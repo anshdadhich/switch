@@ -311,6 +311,26 @@ it('reads updated model, effort and instructions for each launch', async () => {
   expect(second.execution?.context).not.toContain('First instructions');
 });
 
+it('resumes the copy a CLI conversation was continued from, starting its transcript with it', async () => {
+  const config = await buildSharedHostConfig(
+    {
+      ...session,
+      providerSessionId: 'copy-1',
+      cliConversation: { nativeSessionId: 'cli-1', title: 'Fix the build' },
+    },
+    { sessionPath: '/work', sessionEnvVars: {} },
+    { kind: 'local' } as LocationTransport
+  );
+  expect(config.start.input.resume).toEqual({ nativeSessionId: 'copy-1' });
+  expect(config.importHistory).toBe(true);
+  const ordinary = await buildSharedHostConfig(
+    session,
+    { sessionPath: '/work', sessionEnvVars: {} },
+    { kind: 'local' } as LocationTransport
+  );
+  expect(ordinary.importHistory).toBeUndefined();
+});
+
 it('runs a session as the agent definition built from its config file', async () => {
   mocks.definition.mockResolvedValue({ description: 'Reviews diffs', prompt: 'Be careful.' });
   const config = await buildSharedHostConfig(

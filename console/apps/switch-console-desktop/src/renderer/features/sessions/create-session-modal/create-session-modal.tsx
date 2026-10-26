@@ -40,9 +40,12 @@ import { Textarea } from '@renderer/lib/ui/textarea';
 import { log } from '@renderer/utils/logger';
 import { cn } from '@renderer/utils/utils';
 import type { Agent } from '@shared/core/agents/agents';
+import type { CliConversation } from '@shared/core/sessions/cli-conversations';
+import { MAX_SESSION_TITLE_LENGTH } from '@shared/core/sessions/sessions';
 import type { RemoteAgentRoom } from '@shared/core/switch-servers/switch-servers';
 import type { UiEntryPoint } from '@shared/core/telemetry/reporting';
 import { buildConnectPrompt } from './build-connect-prompt';
+import { CliConversationField, useCliConversations } from './cli-conversation-field';
 
 // In Switch Console a "session" is a *session*: a `claude` process spawned in the agent's
 // own directory. The directory is fixed (the agent), the provider is fixed (claude),
@@ -159,6 +162,8 @@ export const CreateSessionModal = observer(function CreateSessionModal({
   const [room, setRoom] = useState<RemoteAgentRoom | null>(null);
   const [roleName, setRoleName] = useState<string>(NO_ROLE);
   const [pickedAgent, setPickedAgent] = useState<Agent | null>(null);
+  const [cliConversation, setCliConversation] = useState<CliConversation | null>(null);
+  const [confirmedClosed, setConfirmedClosed] = useState(false);
 
   // Room-first mode: the room is fixed and the agent is the open question —
   // unless the caller already answered it (a "+" on an agent row listed under
@@ -260,7 +265,19 @@ export const CreateSessionModal = observer(function CreateSessionModal({
   });
   const roles = rolesQuery.data ?? [];
 
-  const canCreate = !!selectedLocationId;
+  // The agent row the session will be owned by. Only a Claude Code agent can
+  // continue a conversation started in its CLI.
+  const sessionAgent = effectiveAgentName ? subagent : agent;
+  const continuable = sessionAgent?.providerId === 'claude';
+  const cliConversations = useCliConversations(continuable ? sessionAgent.id : null);
+  useEffect(() => {
+    setCliConversation(null);
+    setConfirmedClosed(false);
+  }, [sessionAgent?.id]);
+  const awaitingConfirmation =
+    cliConversation !== null && cliConversations.list?.ownershipKnown === false && !confirmedClosed;
+
+  const canCreate = !!selectedLocationId && !awaitingConfirmation;
 
   const handleSpawn = () => {
     if (!selectedLocationId) return;
@@ -304,9 +321,20 @@ export const CreateSessionModal = observer(function CreateSessionModal({
       const created = sessionManager.createSession({
         id,
         agentId: resolvedAgent.id,
-        title: trimmedName || (activeRoom ? `Session for ${activeRoom.roomName}` : 'Session'),
+        title:
+          trimmedName ||
+          cliConversation?.title.slice(0, MAX_SESSION_TITLE_LENGTH) ||
+          (activeRoom ? `Session for ${activeRoom.roomName}` : 'Session'),
         initialPrompt,
         agentName: effectiveAgentName || undefined,
+        ...(continuable && cliConversation
+          ? {
+              cliConversation: {
+                nativeSessionId: cliConversation.nativeSessionId,
+                title: cliConversation.title,
+              },
+            }
+          : {}),
         entryPoint,
         // Whether a room was asked for, never which one. Declared here because
         // the record `noteIntendedRoom` just wrote is consumed while this
@@ -440,6 +468,15 @@ export const CreateSessionModal = observer(function CreateSessionModal({
                 </p>
               )}
             </Field>
+          )}
+          {continuable && (
+            <CliConversationField
+              conversations={cliConversations}
+              value={cliConversation}
+              onChange={setCliConversation}
+              confirmedClosed={confirmedClosed}
+              onConfirmedClosedChange={setConfirmedClosed}
+            />
           )}
           <Field>
             <FieldLabel>Name</FieldLabel>

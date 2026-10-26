@@ -14,6 +14,7 @@ import type {
   CreateSessionParams,
 } from '@shared/core/sessions/sessions';
 import type { SessionStartSource } from '@shared/core/telemetry/reporting';
+import { forkCliConversation } from '../cli-conversations';
 import { provisionSessionRuntime } from '../session-builder';
 import { sessionRuntimeManager } from '../session-runtime-manager';
 import { mapSessionRowToSession } from '../utils/utils';
@@ -52,6 +53,26 @@ export async function createSession(
 
   const configObj: SessionConfig = {};
   if (params.initialPrompt?.trim()) configObj.initialPrompt = params.initialPrompt.trim();
+  if (params.cliConversation) {
+    if (!location) return err({ type: 'agent-not-found' });
+    if (agent.providerId !== 'claude')
+      return err({
+        type: 'spawn-failed',
+        message: 'Only Claude Code agents can continue a conversation started in its CLI.',
+      });
+    // Copied before the session exists, so a conversation that cannot be
+    // continued (open in a terminal, say) leaves no session behind. The copy
+    // is what the session resumes; the CLI's own conversation is never written.
+    try {
+      configObj.providerSessionId = await forkCliConversation(
+        location,
+        params.cliConversation.nativeSessionId
+      );
+    } catch (e) {
+      return err({ type: 'spawn-failed', message: e instanceof Error ? e.message : String(e) });
+    }
+    configObj.cliConversation = params.cliConversation;
+  }
   // The session's launch identity is not stored — it is read live from the
   // owning agent's `name` (see mapSessionRowToSession). How that name spawns is
   // the provider's business (Claude Code → `--agent <name>`) (CHOO-1440).

@@ -57,6 +57,37 @@ export async function locateSharedHost(
   return null;
 }
 
+/**
+ * Runs this build's shared host with `args`, for a one-off command that is
+ * part of starting a session: here on Console's own runtime, as local sessions
+ * run, and on an SSH host on its `node`, after uploading this build's bundle if
+ * it is not there yet. Unlike `locateSharedHost` it never falls back to a
+ * bundle an earlier Console left, which may not know the command.
+ */
+export async function runLaunchHostCommand(
+  transport: LocationTransport,
+  args: string[]
+): Promise<{ stdout: string; stderr: string }> {
+  if (transport.kind !== 'ssh') {
+    const ctx = new LocalExecutionContext();
+    try {
+      return await ctx.exec(process.execPath, [resolveSharedHostBundlePath(), ...args], {
+        env: { ELECTRON_RUN_AS_NODE: '1' },
+      });
+    } finally {
+      ctx.dispose();
+    }
+  }
+  const { entrypoint } = await ensureHostBundle(transport);
+  const proxy = await ensureSshConnected(transport.connectionId, transport.host);
+  const ctx = new SshExecutionContext(proxy, { root: transport.dir });
+  try {
+    return await ctx.exec('node', [entrypoint, ...args]);
+  } finally {
+    ctx.dispose();
+  }
+}
+
 export async function deploySharedHost(
   transport: LocationTransport,
   sessionPath: string,

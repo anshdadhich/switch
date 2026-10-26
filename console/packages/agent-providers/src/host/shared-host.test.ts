@@ -313,6 +313,7 @@ async function start(
         connectorMcpServers: [],
       },
       ...(opts.rooms ? { roomConnection: { connectionId: 'controller' } } : {}),
+      importHistory: false,
       parent: channel,
       parkAfterMs: opts.parkAfterMs ?? null,
       instructions: opts.instructions ?? null,

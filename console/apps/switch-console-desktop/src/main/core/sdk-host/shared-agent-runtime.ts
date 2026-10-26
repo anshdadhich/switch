@@ -396,7 +396,10 @@ export class SharedAgentRuntime implements AgentRuntimeProvider {
 }
 
 export async function buildSharedHostConfig(
-  session: Pick<Session, 'id' | 'agentId' | 'providerId' | 'agentName' | 'providerSessionId'>,
+  session: Pick<
+    Session,
+    'id' | 'agentId' | 'providerId' | 'agentName' | 'providerSessionId' | 'cliConversation'
+  >,
   params: { sessionPath: string; sessionEnvVars: Record<string, string>; shellSetup?: string },
   transport: LocationTransport
 ): Promise<SharedHostConfig> {
@@ -482,6 +485,7 @@ export async function buildSharedHostConfig(
     // Every session of an agent is reached over that agent's one connection,
     // held by its controller, so the identity is derived rather than minted:
     // a session that restarts binds to the same one it did before.
+    ...(session.cliConversation ? { importHistory: true } : {}),
     roomConnection: {
       connectionId: controllerConnectionId(agent.switchAgentId),
       ...(persistedRoom?.switchAgentId === agent.switchAgentId

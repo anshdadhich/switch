@@ -12,6 +12,11 @@ const mocks = vi.hoisted(() => ({
   provisionSessionRuntime: vi.fn(),
   registerSession: vi.fn(),
   startSession: vi.fn(),
+  forkCliConversation: vi.fn(),
+}));
+
+vi.mock('../cli-conversations', () => ({
+  forkCliConversation: mocks.forkCliConversation,
 }));
 
 vi.mock('@main/core/agents/getAgentById', () => ({
@@ -99,6 +104,57 @@ describe('createSession', () => {
     mocks.getAgentById.mockResolvedValue(undefined);
     const result = await createSession(baseParams);
     expect(result).toEqual({ success: false, error: { type: 'agent-not-found' } });
+    expect(mocks.insert).not.toHaveBeenCalled();
+  });
+
+  it('continues a copy of a CLI conversation, recording which one it continues', async () => {
+    mocks.forkCliConversation.mockResolvedValue('copy-1');
+    const cliConversation = { nativeSessionId: 'cli-1', title: 'Fix the build' };
+    const result = await createSession({ ...baseParams, cliConversation });
+    expect(result.success).toBe(true);
+    if (!result.success) throw new Error('Expected session creation to succeed');
+    expect(mocks.forkCliConversation).toHaveBeenCalledWith(
+      expect.objectContaining({ dir: '/repo' }),
+      'cli-1'
+    );
+    expect(result.data.session.providerSessionId).toBe('copy-1');
+    expect(result.data.session.cliConversation).toEqual(cliConversation);
+    expect(mocks.startSession).toHaveBeenCalledTimes(1);
+  });
+
+  it('creates no session when the CLI conversation cannot be copied', async () => {
+    mocks.forkCliConversation.mockRejectedValue(
+      new Error(
+        'This conversation is open in Claude Code (process 41). Close it there, then try again.'
+      )
+    );
+    const result = await createSession({
+      ...baseParams,
+      cliConversation: { nativeSessionId: 'cli-1', title: 'Fix the build' },
+    });
+    expect(result).toEqual({
+      success: false,
+      error: {
+        type: 'spawn-failed',
+        message:
+          'This conversation is open in Claude Code (process 41). Close it there, then try again.',
+      },
+    });
+    expect(mocks.insert).not.toHaveBeenCalled();
+  });
+
+  it('refuses to continue a CLI conversation for an agent that is not Claude Code', async () => {
+    mocks.getAgentById.mockResolvedValue({
+      id: 'agent-1',
+      locationId: 'loc-1',
+      providerId: 'codex',
+    });
+    const result = await createSession({
+      ...baseParams,
+      cliConversation: { nativeSessionId: 'cli-1', title: 'Fix the build' },
+    });
+    expect(result.success).toBe(false);
+    expect(mocks.forkCliConversation).not.toHaveBeenCalled();
     expect(mocks.insert).not.toHaveBeenCalled();
   });
 

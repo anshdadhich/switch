@@ -111,6 +111,46 @@ Adopted sessions do not launch providers. Open their location and select the ses
 to load its transcript. Existing older Console binaries need an update to receive
 these discovery fixes.
 
+## Continuing a Claude Code CLI conversation
+
+A Claude Code agent's session can continue a conversation that was started in
+Claude Code's own terminal or IDE clients in the agent's folder. Pick it under
+**Conversation** in the new-session dialog. The list is read on the session's
+execution host, local or SSH, with the Agent SDK's `listSessions`. Conversations a
+program started through the SDK are left out, Switch's own sessions included,
+and so are the copies Console's sessions in that folder already run. Only Claude
+Code conversations can be continued; Codex runs each session in a private
+`CODEX_HOME` and records no running conversations to check against.
+
+The session never writes to the CLI's conversation. Starting the session copies
+it under a new id (the SDK's `forkSession`), and the session resumes the copy.
+The copy is titled `… (continued in Switch Console)`, so Claude Code's own
+`/resume` list shows it is taken. The original stays the terminal's. Continuing
+it there afterwards starts a separate branch that does not include what happened
+in Console.
+
+A conversation that a running Claude Code process has open cannot be picked, and
+the copy is refused if one has opened it since. Claude Code records each running
+process under its config directory's `sessions/<pid>.json`. A record counts while
+its process is alive and was started at the recorded time (`ps -o lstart=` in
+UTC), so a reused process id does not block a conversation. A live process
+whose start cannot be compared is taken to hold its conversation. A Claude Code
+too old to keep these records cannot be checked, and the dialog asks for
+confirmation that the conversation is closed.
+
+No earlier prompt is sent again. Before the provider starts, the session's
+transcript is filled with the copy's earlier turns, up to the last 500 items:
+prompts, Claude's replies, and the tools it ran, with a failed tool marked as
+failed. Reasoning and subagents' own messages are left out, as they are from a
+live transcript. A notice after those turns says how many earlier turns were
+not shown. The host records the import once it is done; an import cut short by a
+crash runs again and republishes the same items under the same ids. If the
+conversation cannot be read, a warning says so once and the session goes on to
+resume it, which decides whether it is there. Because the session continues a conversation
+that already had answers, a copy that cannot be resumed is never quietly
+replaced with a new conversation. Console asks for the explicit fresh start
+instead.
+
 ## Context, models and attachments
 
 Reset starts a fresh native conversation under a new server-issued epoch. The

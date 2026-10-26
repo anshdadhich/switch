@@ -94,6 +94,8 @@ export type SharedHostOptions = {
   input: ProviderSessionStartInput;
   roomConnection?: z.infer<typeof roomConnectionSchema>;
   grant?: { roomId: string; messageId: string };
+  /** The session continues a native conversation started outside Switch. */
+  importHistory: boolean;
   /** The IPC channel to the process that started this host, or null if none did. */
   parent: ParentChannel | null;
   /** How long the host waits with nothing to do before parking; null never parks. */
@@ -389,6 +391,7 @@ export async function runSharedHost(
           : {}),
         session: options.session,
         input: options.input,
+        importHistory: options.importHistory,
         resumeOperationId: options.resumeOperationId,
         authenticate: options.authenticate,
         redactions: options.redactions,
@@ -1133,6 +1136,7 @@ export async function hostSessionProcess(input: {
         input: prepared.input,
         roomConnection: config.roomConnection,
         grant: config.grant,
+        importHistory: config.importHistory ?? false,
         parent,
         parkAfterMs: parkAfterMs(),
         instructions: config.execution?.instructions ?? null,

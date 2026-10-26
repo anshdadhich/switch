@@ -20,7 +20,12 @@ import type {
 } from '@switch-console/shared/session-v1';
 import { z } from 'zod';
 import { ProviderConversationUnavailableError } from '../adapter';
-import type { ProviderAdapter, ProviderSessionStartInput, TurnAttachment } from '../adapter';
+import type {
+  ConversationHistoryTurn,
+  ProviderAdapter,
+  ProviderSessionStartInput,
+  TurnAttachment,
+} from '../adapter';
 import type { TokenUsage, TurnOutcome, UserInputAnswers } from '../events';
 import type { ProviderRuntimeEvent } from '../events';
 import { ChatProjector } from '../session-v1/chat-projector';
@@ -58,6 +63,8 @@ export const hostInboxRecordSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('model'), id: z.string(), options: z.record(z.string(), z.string()) }),
   /** The host posts this turn's reply to its room itself: decided once, before posting. */
   z.object({ type: z.literal('room-reply'), commandId: z.string() }),
+  /** The earlier turns of the conversation this session continues are in its transcript. */
+  z.object({ type: z.literal('history-imported') }),
 ]);
 type RecordEntry = z.infer<typeof hostInboxRecordSchema>;
 export type HostSessionStart = {
@@ -75,6 +82,12 @@ export type HostSessionStart = {
   replyToRoom?: (reply: RoomReply) => Promise<void>;
   /** Service tokens to scrub from every event before it is recorded; none when absent. */
   redactions?: Redactions;
+  /**
+   * The session continues a native conversation started outside Switch, so
+   * its transcript starts with that conversation's turns, and a conversation
+   * that cannot be resumed is never quietly replaced by a new one.
+   */
+  importHistory?: boolean;
   /**
    * Told each time the provider asks to run a connector's tool, before the
    * request is published, so a notice it raises comes ahead of the card.
@@ -106,6 +119,7 @@ export class HostedSession {
   private readonly dispatched = new Set<string>();
   private readonly finished = new Set<string>();
   private readonly roomReplies = new Set<string>();
+  private historyImported = false;
   private readonly postedTurns = new Set<string>();
   private readonly usage = new Map<string, TokenUsage[]>();
   private readonly resumeOperations = new Set<string>();
@@ -185,6 +199,7 @@ export class HostedSession {
       if (record.type === 'reset-completed') this.resetPending = false;
       if (record.type === 'model') config.input.model = { id: record.id, options: record.options };
       if (record.type === 'room-reply') this.roomReplies.add(record.commandId);
+      if (record.type === 'history-imported') this.historyImported = true;
     }
     this.projector = new ChatProjector(config.session, config.redactions ?? null);
     this.unsubscribe = adapter.subscribe((event) => {
@@ -287,7 +302,7 @@ export class HostedSession {
         }
         // A session whose provider never opened a conversation (its first
         // start failed) has nothing to resume: it starts one below.
-        if (!host.nativeId && host.providerAnswered())
+        if (!host.nativeId && !config.input.resume && host.providerAnswered())
           throw new Error('Cannot recover a session without its native provider ID.');
         if (config.epochAuthority !== 'server') config.session.epoch = randomUUID();
         const next = host.replica.snapshot();
@@ -297,6 +312,9 @@ export class HostedSession {
         host.replica = new SessionReplica(next);
       }
       await host.publish({ type: 'session.upsert', session: structuredClone(config.session) });
+      const continued = config.input.resume?.nativeSessionId;
+      if (config.importHistory && !host.historyImported && continued)
+        await host.importHistory(continued);
       const native = await host.startProvider({
         ...config.input,
         ...(host.nativeId ? { resume: { nativeSessionId: host.nativeId } } : {}),
@@ -325,8 +343,9 @@ export class HostedSession {
         await host.eventSerial;
         // Nothing the provider said is lost when it never answered (a session
         // whose turns all failed while its CLI was signed out, say): start a
-        // new conversation rather than ask.
-        if (!host.providerAnswered()) {
+        // new conversation rather than ask. A conversation this session was
+        // started to continue was answered before Switch had it.
+        if (!host.providerAnswered() && !config.importHistory) {
           try {
             await host.startFresh();
             return host;
@@ -379,6 +398,75 @@ export class HostedSession {
       message:
         'Started a new provider conversation: the earlier one was never saved by the provider, so there was nothing to resume.',
     });
+  }
+
+  /**
+   * Publishes the earlier turns of the native conversation this session
+   * continues, ahead of any of its own: the most recent ones, up to
+   * {@link HISTORY_ITEM_LIMIT} items. Recorded once done. An import a crash cut
+   * short runs again on the next start and republishes what it had published
+   * unchanged, under the same ids.
+   *
+   * A conversation that cannot be read is said in the transcript, once, and
+   * does not stop the session: resuming is what decides whether the
+   * conversation is there, and asks before replacing it.
+   */
+  private async importHistory(nativeSessionId: string): Promise<void> {
+    let turns: ConversationHistoryTurn[];
+    try {
+      if (!this.adapter.conversationHistory)
+        throw new Error(`${this.config.session.provider} cannot read its saved conversations.`);
+      turns = await this.adapter.conversationHistory(nativeSessionId, this.config.input.cwd);
+    } catch (error) {
+      await this.publish({
+        type: 'notice',
+        level: 'warning',
+        code: 'HISTORY_UNAVAILABLE',
+        message: `Could not show the earlier turns of the conversation this session continues: ${error instanceof Error ? error.message : String(error)}`,
+      });
+      await this.inbox.append({ type: 'history-imported' });
+      this.historyImported = true;
+      return;
+    }
+    const shown = recentTurns(turns, HISTORY_ITEM_LIMIT);
+    for (const turn of shown) {
+      await this.publish({
+        type: 'turn.upsert',
+        turnId: turn.turnId,
+        status: 'completed',
+        commandId: null,
+      });
+      for (const item of turn.items) {
+        const characters = Array.from(item.text);
+        const parts = Math.max(1, Math.ceil(characters.length / ITEM_PART_CHARACTERS));
+        for (let index = 0; index < parts; index++)
+          await this.publish({
+            type: 'item.upsert',
+            item: {
+              itemId: index === 0 ? item.itemId : `${item.itemId}:part:${index}`,
+              turnId: turn.turnId,
+              revision: 1,
+              kind: item.kind,
+              status: item.status,
+              title: item.title.slice(0, ITEM_PART_CHARACTERS),
+              text: characters
+                .slice(index * ITEM_PART_CHARACTERS, (index + 1) * ITEM_PART_CHARACTERS)
+                .join(''),
+              attachments: [],
+              origin: null,
+            },
+          });
+      }
+    }
+    const hidden = turns.length - shown.length;
+    await this.publish({
+      type: 'notice',
+      level: 'info',
+      code: 'HISTORY_IMPORTED',
+      message: `${hidden > 0 ? `Above are the last ${shown.length} turns of the conversation this session continues; ${hidden} earlier ${hidden === 1 ? 'turn is' : 'turns are'} not shown here.` : 'Above is the conversation this session continues.'} It was copied when the session started, and the agent has all of it. The original is unchanged.`,
+    });
+    await this.inbox.append({ type: 'history-imported' });
+    this.historyImported = true;
   }
 
   private async startProvider(input: ProviderSessionStartInput) {
@@ -1340,6 +1428,33 @@ export class HostedSession {
     await this.publishing;
     this.unsubscribe();
   }
+}
+
+/** How many items of a continued conversation's earlier turns a transcript starts with. */
+const HISTORY_ITEM_LIMIT = 500;
+/** As much text as one published item carries, as the chat projector splits it. */
+const ITEM_PART_CHARACTERS = 4096;
+
+/**
+ * The most recent turns that together hold no more than `limit` items, oldest
+ * first. A latest turn larger than that on its own keeps its last `limit`.
+ */
+export function recentTurns(
+  turns: ConversationHistoryTurn[],
+  limit: number
+): ConversationHistoryTurn[] {
+  const kept: ConversationHistoryTurn[] = [];
+  let items = 0;
+  for (let index = turns.length - 1; index >= 0; index--) {
+    const turn = turns[index]!;
+    if (items + turn.items.length > limit) {
+      if (kept.length === 0) kept.push({ ...turn, items: turn.items.slice(-limit) });
+      break;
+    }
+    kept.push(turn);
+    items += turn.items.length;
+  }
+  return kept.reverse();
 }
 
 /**
