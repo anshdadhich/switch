@@ -1,9 +1,11 @@
+import { readFile } from 'node:fs/promises';
 import { z } from 'zod';
 import {
   type CliConversationList,
   forkClaudeCliConversation,
   listClaudeCliConversations,
 } from '../claude/cli-conversations';
+import { executionEnvironment } from './shared-config';
 
 /**
  * What the host's one-off conversation commands print instead of their answer
@@ -12,28 +14,41 @@ import {
  */
 export const cliConversationFailureSchema = z.object({ error: z.string() });
 
-/** The conversations started in `dir` from the provider's own CLI, for a session to continue. */
-export async function listCliConversations(
-  provider: string,
-  dir: string
-): Promise<CliConversationList> {
-  continuable(provider);
-  return listClaudeCliConversations(dir, process.env);
-}
+/**
+ * What Console asks a conversation command, staged as a private file because
+ * a shell setup may hold secrets a command line would show to `ps`. The
+ * session's variables, shell setup and inherited names are what its host would
+ * start the provider with, so Claude Code is looked for where the session's
+ * Claude Code will look.
+ */
+export const cliConversationRequestSchema = z.strictObject({
+  provider: z.string(),
+  dir: z.string().min(1),
+  env: z.record(z.string(), z.string()),
+  shellSetup: z.string().optional(),
+  inheritEnv: z.array(z.string()),
+  /** The conversation to copy, for `--fork-cli-conversation`. */
+  nativeSessionId: z.string().min(1).optional(),
+});
+export type CliConversationRequest = z.infer<typeof cliConversationRequestSchema>;
 
-/** A copy of one of those conversations, under a new id, for a session to continue. */
-export async function forkCliConversation(
-  provider: string,
-  dir: string,
-  nativeSessionId: string
-): Promise<{ nativeSessionId: string }> {
-  continuable(provider);
-  return forkClaudeCliConversation(dir, nativeSessionId, process.env);
-}
-
-function continuable(provider: string): void {
-  if (provider !== 'claude')
+/** Answers `--cli-conversations` or `--fork-cli-conversation` for the request at `path`. */
+export async function answerCliConversationRequest(
+  mode: '--cli-conversations' | '--fork-cli-conversation',
+  path: string
+): Promise<CliConversationList | { nativeSessionId: string }> {
+  const request = cliConversationRequestSchema.parse(JSON.parse(await readFile(path, 'utf8')));
+  if (request.provider !== 'claude')
     throw new Error(
-      `Switch continues conversations started in Claude Code, not ones started in ${provider}.`
+      `Switch continues conversations started in Claude Code, not ones started in ${request.provider}.`
     );
+  const env = await executionEnvironment(
+    request.dir,
+    request.env,
+    request.shellSetup,
+    request.inheritEnv
+  );
+  if (mode === '--cli-conversations') return listClaudeCliConversations(request.dir, env);
+  if (!request.nativeSessionId) throw new Error('Name the conversation to copy.');
+  return forkClaudeCliConversation(request.dir, request.nativeSessionId, env);
 }

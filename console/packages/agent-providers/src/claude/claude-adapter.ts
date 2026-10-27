@@ -67,6 +67,7 @@ import {
   toolTitle,
   truncate,
 } from './claude-mapping';
+import { withClaudeConfigDir } from './cli-conversations';
 
 const PROVIDER = 'claude';
 const ASK_USER_QUESTION = 'AskUserQuestion';
@@ -620,15 +621,18 @@ export class ClaudeAdapter implements ProviderAdapter {
 
   /**
    * Read from Claude Code's saved transcript, the way its own `/resume` reads
-   * it, under the `CLAUDE_CONFIG_DIR` this process has. A conversation with
+   * it, in the config directory `env` gives Claude Code. A conversation with
    * nothing in it is an error rather than an empty history: it is either not
    * there or not one a person had.
    */
   async conversationHistory(
     nativeSessionId: string,
-    cwd: string
+    cwd: string,
+    env: Record<string, string>
   ): Promise<ConversationHistoryTurn[]> {
-    const messages = await this.sessionMessages(nativeSessionId, { dir: cwd });
+    const messages = await withClaudeConfigDir(env, () =>
+      this.sessionMessages(nativeSessionId, { dir: cwd })
+    );
     if (messages.length === 0)
       throw new Error(`Claude Code has no saved conversation ${nativeSessionId} to show.`);
     return historyFromClaudeMessages(messages);

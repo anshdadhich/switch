@@ -3,6 +3,9 @@ import type { ProviderRuntimeEvent } from '../events';
 import type { Redactions } from '../host/redaction';
 
 type TurnContext = { commandId: string | null; origin: Origin | null };
+
+/** As much text as one published item carries; longer text goes in `:part:` items after it. */
+export const ITEM_PART_CHARACTERS = 4096;
 type BufferedItem = { item: Item; emittedAt: number; dirty: boolean; parts: number };
 
 /** Projects chat and tool summaries only. The host owns sequencing and durable publication. */
@@ -82,7 +85,7 @@ export class ChatProjector {
           revision: previous?.item.revision ?? 0,
           kind,
           status: event.item.status === 'in_progress' ? 'in-progress' : event.item.status,
-          title: event.item.title.slice(0, 4096),
+          title: event.item.title.slice(0, ITEM_PART_CHARACTERS),
           text: kind === 'tool-activity' ? '' : (event.item.text ?? previous?.item.text ?? ''),
           attachments: [],
           origin: kind === 'user-message' ? context.origin : null,
@@ -124,14 +127,16 @@ export class ChatProjector {
     buffer.emittedAt = now;
     buffer.dirty = false;
     const characters = Array.from(this.visible(buffer.item.text, final));
-    const count = Math.max(1, Math.ceil(characters.length / 4096), buffer.parts);
+    const count = Math.max(1, Math.ceil(characters.length / ITEM_PART_CHARACTERS), buffer.parts);
     buffer.parts = count;
     return Array.from({ length: count }, (_, index) => ({
       type: 'item.upsert' as const,
       item: {
         ...structuredClone(buffer.item),
         itemId: index === 0 ? buffer.item.itemId : `${buffer.item.itemId}:part:${index}`,
-        text: characters.slice(index * 4096, (index + 1) * 4096).join(''),
+        text: characters
+          .slice(index * ITEM_PART_CHARACTERS, (index + 1) * ITEM_PART_CHARACTERS)
+          .join(''),
       },
     }));
   }

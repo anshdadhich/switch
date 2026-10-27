@@ -213,10 +213,14 @@ export interface ProviderAdapter {
   /**
    * The turns of a saved native conversation, oldest first: what a session
    * that continues a conversation started outside Switch shows before its own.
-   * Read without starting the session. Absent means the provider cannot read
-   * its saved conversations.
+   * Read without starting the session, from where a session with `env` would
+   * find it. Absent means the provider cannot read its saved conversations.
    */
-  conversationHistory?(nativeSessionId: string, cwd: string): Promise<ConversationHistoryTurn[]>;
+  conversationHistory?(
+    nativeSessionId: string,
+    cwd: string,
+    env: Record<string, string>
+  ): Promise<ConversationHistoryTurn[]>;
   stopSession(sessionId: string): Promise<void>;
   stopAll(): Promise<void>;
   hasSession(sessionId: string): boolean;

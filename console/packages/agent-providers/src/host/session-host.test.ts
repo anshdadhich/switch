@@ -11,6 +11,7 @@ import {
 } from '../adapter';
 import type { ProviderRuntimeEvent } from '../events';
 import { abandonWaits, announcing, changed, until } from '../testing/until';
+import { Redactions } from './redaction';
 import { CONNECTOR_APPROVAL_NOTICE, ServiceNotices } from './service-notices';
 import { HostedSession, recentTurns, type RoomReply, unpostedReply } from './session-host';
 
@@ -629,7 +630,7 @@ it('starts a continued conversation’s transcript with its earlier turns, befor
   const host = await startHost(root, fixture.config, fixture.adapter);
   hosts.push(host);
   await until(() => expect(host.snapshot().session.status).toBe('ready'));
-  expect(fixture.adapter.conversationHistory).toHaveBeenCalledWith('cli-copy', tmpdir());
+  expect(fixture.adapter.conversationHistory).toHaveBeenCalledWith('cli-copy', tmpdir(), {});
   expect(fixture.adapter.startSession).toHaveBeenCalledWith(
     expect.objectContaining({ resume: { nativeSessionId: 'cli-copy' } })
   );
@@ -710,6 +711,57 @@ it('asks before replacing a continued conversation it cannot resume, and says wh
   const restarted = await startHost(root, next.config, next.adapter);
   hosts.push(restarted);
   expect(next.adapter.conversationHistory).not.toHaveBeenCalled();
+});
+
+it('scrubs a token from a continued conversation’s history before cutting long text into parts', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'sdk-history-test-'));
+  roots.push(root);
+  const token = 'tok-0123456789abcdefghij';
+  const text = `${'x'.repeat(4090)}${token} and more`;
+  const fixture = continuing('claude', async () => [
+    {
+      turnId: 'cli:prompt-1',
+      items: [{ itemId: 'cli:a', kind: 'assistant-message', status: 'completed', title: '', text }],
+    },
+  ]);
+  const redactions = new Redactions();
+  redactions.add(token);
+  const host = await startHost(root, { ...fixture.config, redactions }, fixture.adapter);
+  hosts.push(host);
+  await until(() => expect(host.snapshot().session.status).toBe('ready'));
+  const published = host
+    .snapshot()
+    .items.map((item) => item.text)
+    .join('');
+  expect(published).not.toContain(token.slice(0, 6));
+  expect(published).not.toContain(token.slice(-6));
+});
+
+it('says how much of a continued conversation it left out, a long latest turn included', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'sdk-history-test-'));
+  roots.push(root);
+  const fixture = continuing('claude', async () => [
+    {
+      turnId: 'cli:long',
+      items: Array.from({ length: 600 }, (_, index) => ({
+        itemId: `cli:long:${index}`,
+        kind: 'tool-activity' as const,
+        status: 'completed' as const,
+        title: `step ${index}`,
+        text: '',
+      })),
+    },
+  ]);
+  const host = await startHost(root, fixture.config, fixture.adapter);
+  hosts.push(host);
+  await until(() => expect(host.snapshot().session.status).toBe('ready'));
+  expect(host.snapshot().items).toHaveLength(500);
+  expect(host.snapshot().notices).toContainEqual(
+    expect.objectContaining({
+      code: 'HISTORY_IMPORTED',
+      message: expect.stringContaining('the last 500 of the 600 messages and tool calls'),
+    })
+  );
 });
 
 it('keeps the most recent whole turns of a long conversation', () => {

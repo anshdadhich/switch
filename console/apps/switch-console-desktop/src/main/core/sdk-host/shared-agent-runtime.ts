@@ -482,10 +482,10 @@ export async function buildSharedHostConfig(
         ...(sessionLaunch.model ? { model: sessionLaunch.model } : {}),
       },
     },
+    ...(session.cliConversation ? { importHistory: true } : {}),
     // Every session of an agent is reached over that agent's one connection,
     // held by its controller, so the identity is derived rather than minted:
     // a session that restarts binds to the same one it did before.
-    ...(session.cliConversation ? { importHistory: true } : {}),
     roomConnection: {
       connectionId: controllerConnectionId(agent.switchAgentId),
       ...(persistedRoom?.switchAgentId === agent.switchAgentId

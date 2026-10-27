@@ -1,7 +1,7 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, posix } from 'node:path';
 import { resolveSharedHostBundlePath } from '@main/core/agent-runtime/impl/resolve-sidecar-bundle';
 import { LocalExecutionContext } from '@main/core/execution-context/local-execution-context';
 import { SshExecutionContext } from '@main/core/execution-context/ssh-execution-context';
@@ -9,7 +9,8 @@ import type { IExecutionContext } from '@main/core/execution-context/types';
 import { SshFileSystem } from '@main/core/fs/impl/ssh-fs';
 import type { LocationTransport } from '@main/core/locations/location-transport';
 import { ensureSshConnected } from '@main/core/ssh/connect/connect-agent-ssh';
-import { ensureHostBundle } from './host-bundle';
+import { log } from '@main/lib/logger';
+import { ensureHostBundle, forgetHostBundle, type HostBundle } from './host-bundle';
 import { MAKE_LAUNCH_DIR, RESOLVE_STATE_ROOT, STALE_LAUNCH_MS } from './state-roots';
 
 /**
@@ -58,34 +59,106 @@ export async function locateSharedHost(
 }
 
 /**
- * Runs this build's shared host with `args`, for a one-off command that is
- * part of starting a session: here on Console's own runtime, as local sessions
- * run, and on an SSH host on its `node`, after uploading this build's bundle if
- * it is not there yet. Unlike `locateSharedHost` it never falls back to a
- * bundle an earlier Console left, which may not know the command.
+ * Answers a request with one of this build's shared host's one-off commands.
+ * The request is staged as a file only the user can read, beside a launch's
+ * configuration, and removed afterwards, since it can carry a shell setup a
+ * command line would show to `ps`. Here it runs on Console's own runtime, as
+ * local sessions do; on an SSH host it runs on the host's `node`.
+ *
+ * `deploy` uploads this build's bundle to an SSH host first when it is not
+ * there, which only a launch may do. Without it the command runs only where
+ * this build's bundle already is: reading a host must not change what is
+ * installed there, and an earlier build's bundle may not know the command.
  */
-export async function runLaunchHostCommand(
+export async function runHostRequest(
   transport: LocationTransport,
-  args: string[]
+  mode: string,
+  request: unknown,
+  options: { deploy: boolean; timeout: number }
 ): Promise<{ stdout: string; stderr: string }> {
   if (transport.kind !== 'ssh') {
+    const local = await mkdtemp(join(tmpdir(), 'switch-sdk-request-'));
     const ctx = new LocalExecutionContext();
     try {
-      return await ctx.exec(process.execPath, [resolveSharedHostBundlePath(), ...args], {
+      const path = join(local, 'request.json');
+      await writeFile(path, JSON.stringify(request), { mode: 0o600 });
+      return await ctx.exec(process.execPath, [resolveSharedHostBundlePath(), mode, path], {
         env: { ELECTRON_RUN_AS_NODE: '1' },
+        timeout: options.timeout,
       });
     } finally {
       ctx.dispose();
+      await rm(local, { recursive: true, force: true });
     }
   }
-  const { entrypoint } = await ensureHostBundle(transport);
+  const bundle = options.deploy
+    ? await ensureHostBundle(transport)
+    : await thisBuildsBundle(transport);
+  if (!bundle)
+    throw new Error(
+      `${transport.host} does not have this version of Switch Console's host yet. Start a session for an agent there, or press Update on its Room watcher, then try again.`
+    );
   const proxy = await ensureSshConnected(transport.connectionId, transport.host);
+  const name = `launch-${randomUUID()}`;
+  const local = await mkdtemp(join(tmpdir(), 'switch-sdk-request-'));
+  const fs = new SshFileSystem(proxy, bundle.staging);
   const ctx = new SshExecutionContext(proxy, { root: transport.dir });
   try {
-    return await ctx.exec('node', [entrypoint, ...args]);
+    try {
+      await writeFile(join(local, 'request.json'), JSON.stringify(request), { mode: 0o600 });
+      await fs.mkdir(name);
+      await fs.copyLocalFile(join(local, 'request.json'), `${name}/request.json`);
+    } finally {
+      fs.close();
+      await rm(local, { recursive: true, force: true });
+    }
+    return await ctx.exec(
+      'node',
+      [bundle.entrypoint, mode, `${bundle.staging}/${name}/request.json`],
+      { timeout: options.timeout }
+    );
+  } catch (error) {
+    // A bundle that has gone is one reason a launch fails; the next checks again.
+    if (options.deploy) forgetHostBundle(transport.connectionId);
+    throw error;
   } finally {
+    // Not allowed to hide why the command failed. What is left is swept with
+    // abandoned launches (`HOST_PREPARE`).
+    await ctx
+      .exec('node', [
+        '-e',
+        "require('node:fs').rmSync(process.argv[1],{recursive:true,force:true})",
+        `${bundle.staging}/${name}`,
+      ])
+      .catch((error: unknown) =>
+        log.warn('Could not remove a staged host request', {
+          host: transport.host,
+          error: String(error),
+        })
+      );
     ctx.dispose();
   }
+}
+
+/**
+ * This build's bundle on an SSH host, found without deploying it, or null when
+ * the host has another build's or none. Its staging directory sits beside the
+ * bundle's, where `HOST_PREPARE` made both.
+ */
+async function thisBuildsBundle(
+  transport: Extract<LocationTransport, { kind: 'ssh' }>
+): Promise<HostBundle | null> {
+  const hash = createHash('sha256')
+    .update(await readFile(resolveSharedHostBundlePath()))
+    .digest('hex');
+  const located = await locateSharedHost(transport, transport.dir);
+  if (!located) return null;
+  located.ctx.dispose();
+  if (posix.basename(located.entrypoint) !== `shared-host-${hash}.mjs`) return null;
+  return {
+    entrypoint: located.entrypoint,
+    staging: posix.join(posix.dirname(posix.dirname(located.entrypoint)), 'sdk-launch'),
+  };
 }
 
 export async function deploySharedHost(

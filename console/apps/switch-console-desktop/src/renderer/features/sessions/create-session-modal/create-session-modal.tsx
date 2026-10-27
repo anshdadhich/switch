@@ -274,8 +274,22 @@ export const CreateSessionModal = observer(function CreateSessionModal({
     setCliConversation(null);
     setConfirmedClosed(false);
   }, [sessionAgent?.id]);
+  // The picked conversation as the latest listing has it. One that has gone,
+  // or that a terminal has opened since, can no longer be continued.
+  const listed = cliConversation
+    ? cliConversations.list?.conversations.find(
+        (c) => c.nativeSessionId === cliConversation.nativeSessionId
+      )
+    : undefined;
+  useEffect(() => {
+    if (cliConversation && cliConversations.list && (!listed || listed.openIn))
+      setCliConversation(null);
+  }, [cliConversation, cliConversations.list, listed]);
+  // Without a listing (it failed) nothing says the conversation is closed, so
+  // it cannot be continued until it is listed again or a new one is chosen.
   const awaitingConfirmation =
-    cliConversation !== null && cliConversations.list?.ownershipKnown === false && !confirmedClosed;
+    cliConversation !== null &&
+    (cliConversations.list === null || (!cliConversations.list.ownershipKnown && !confirmedClosed));
 
   const canCreate = !!selectedLocationId && !awaitingConfirmation;
 

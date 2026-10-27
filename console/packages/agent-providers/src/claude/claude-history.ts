@@ -2,15 +2,19 @@ import type { SessionMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { ConversationHistoryItem, ConversationHistoryTurn } from '../adapter';
 import { isRecord, toolTitle } from './claude-mapping';
 
-/**
- * A text that is one tag pair and nothing else, such as
- * `<task-notification>…</task-notification>` or `<ide_opened_file>…`: context
- * Claude Code added to the conversation, not something a person typed.
- */
-const ADDED_CONTEXT = /^<([a-z][\w-]*)>[\s\S]*<\/\1>$/;
 /** How Claude Code records a slash command someone ran: `<command-name>/mcp</command-name>…`. */
-const SLASH_COMMAND = /^<command-name>([^<]*)<\/command-name>/;
+const SLASH_COMMAND = /<command-name>([^<]*)<\/command-name>/;
 const COMMAND_ARGS = /<command-args>([^<]*)<\/command-args>/;
+/** A shell command someone ran with `!`. */
+const BASH_INPUT = /<bash-input>([^<]*)<\/bash-input>/;
+/** Claude Code's note that someone stopped a turn: not a prompt. */
+const INTERRUPTED = /^\[Request interrupted by user[^\]]*\]$/;
+/**
+ * How Claude Code's summary of a compacted conversation opens. It is recorded
+ * as a user entry, and the SDK's reader does not say which entry it is.
+ */
+const COMPACTION_SUMMARY = /^This session is being continued from a previous conversation/;
+const OPENING_TAG = /^<([a-z][\w-]*)(?:\s[^>]*)?>/;
 
 /**
  * A Claude Code conversation as transcript turns: each prompt someone typed
@@ -46,6 +50,21 @@ export function historyFromClaudeMessages(messages: SessionMessage[]): Conversat
           const tool = typeof block.tool_use_id === 'string' && tools.get(block.tool_use_id);
           if (tool) tool.status = 'failed';
         }
+      const texts = blocks.flatMap((block) =>
+        block.type === 'text' && typeof block.text === 'string' ? [block.text.trim()] : []
+      );
+      if (texts.some((text) => COMPACTION_SUMMARY.test(text))) {
+        turn = { turnId: `cli:${message.uuid}`, items: [] };
+        turns.push(turn);
+        add(message.uuid, {
+          itemId: `cli:${message.uuid}`,
+          kind: 'tool-activity',
+          status: 'completed',
+          title: 'Conversation compacted: the turns before this were summarized',
+          text: '',
+        });
+        continue;
+      }
       const prompt = blocks
         .map((block) =>
           block.type === 'text' && typeof block.text === 'string'
@@ -94,7 +113,11 @@ export function historyFromClaudeMessages(messages: SessionMessage[]): Conversat
   return turns;
 }
 
-/** What a person typed in one text block: a slash command as they typed it, added context as nothing. */
+/**
+ * What a person typed in one text block: a slash command or `!` command as they
+ * typed it; nothing for what Claude Code added on its own, or its note that a
+ * turn was stopped.
+ */
 function promptText(text: string): string {
   const trimmed = text.trim();
   const command = SLASH_COMMAND.exec(trimmed);
@@ -102,5 +125,29 @@ function promptText(text: string): string {
     const args = COMMAND_ARGS.exec(trimmed)?.[1]?.trim();
     return [command[1]!.trim(), args].filter(Boolean).join(' ');
   }
-  return ADDED_CONTEXT.test(trimmed) ? '' : trimmed;
+  const shell = BASH_INPUT.exec(trimmed);
+  if (shell) return `! ${shell[1]!.trim()}`;
+  if (INTERRUPTED.test(trimmed) || onlyTagBlocks(trimmed)) return '';
+  return trimmed;
+}
+
+/**
+ * Whether a text is tag-wrapped blocks and nothing else, such as
+ * `<task-notification>…</task-notification>` or a command's
+ * `<bash-stdout>…</bash-stdout><bash-stderr>…</bash-stderr>`: context Claude
+ * Code added to the conversation, not something a person typed. Walked rather
+ * than matched with one pattern, which would backtrack on a long paste.
+ */
+function onlyTagBlocks(text: string): boolean {
+  let rest = text;
+  if (!rest) return false;
+  while (rest) {
+    const open = OPENING_TAG.exec(rest);
+    if (!open) return false;
+    const closing = `</${open[1]}>`;
+    const end = rest.indexOf(closing, open[0].length);
+    if (end < 0) return false;
+    rest = rest.slice(end + closing.length).trimStart();
+  }
+  return true;
 }

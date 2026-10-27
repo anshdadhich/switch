@@ -28,7 +28,7 @@ import type {
 } from '../adapter';
 import type { TokenUsage, TurnOutcome, UserInputAnswers } from '../events';
 import type { ProviderRuntimeEvent } from '../events';
-import { ChatProjector } from '../session-v1/chat-projector';
+import { ChatProjector, ITEM_PART_CHARACTERS } from '../session-v1/chat-projector';
 import { ATTACHMENT_MIME_TYPES } from './attachments';
 import { Journal } from './journal';
 import { fitModelCatalog } from './model-catalog';
@@ -301,8 +301,9 @@ export class HostedSession {
           return host;
         }
         // A session whose provider never opened a conversation (its first
-        // start failed) has nothing to resume: it starts one below.
-        if (!host.nativeId && !config.input.resume && host.providerAnswered())
+        // start failed) has nothing to resume: it starts one below. One that
+        // continues a conversation resumes the copy it was started with.
+        if (!host.nativeId && !config.importHistory && host.providerAnswered())
           throw new Error('Cannot recover a session without its native provider ID.');
         if (config.epochAuthority !== 'server') config.session.epoch = randomUUID();
         const next = host.replica.snapshot();
@@ -403,9 +404,9 @@ export class HostedSession {
   /**
    * Publishes the earlier turns of the native conversation this session
    * continues, ahead of any of its own: the most recent ones, up to
-   * {@link HISTORY_ITEM_LIMIT} items. Recorded once done. An import a crash cut
-   * short runs again on the next start and republishes what it had published
-   * unchanged, under the same ids.
+   * {@link HISTORY_ITEM_LIMIT} items, a batch to a journal write. Recorded once
+   * done. An import a crash cut short runs again on the next start and
+   * republishes what it had published unchanged, under the same ids.
    *
    * A conversation that cannot be read is said in the transcript, once, and
    * does not stop the session: resuming is what decides whether the
@@ -416,7 +417,11 @@ export class HostedSession {
     try {
       if (!this.adapter.conversationHistory)
         throw new Error(`${this.config.session.provider} cannot read its saved conversations.`);
-      turns = await this.adapter.conversationHistory(nativeSessionId, this.config.input.cwd);
+      turns = await this.adapter.conversationHistory(
+        nativeSessionId,
+        this.config.input.cwd,
+        this.config.input.env
+      );
     } catch (error) {
       await this.publish({
         type: 'notice',
@@ -429,18 +434,23 @@ export class HostedSession {
       return;
     }
     const shown = recentTurns(turns, HISTORY_ITEM_LIMIT);
+    const bodies: HostBody[] = [];
     for (const turn of shown) {
-      await this.publish({
+      bodies.push({
         type: 'turn.upsert',
         turnId: turn.turnId,
         status: 'completed',
         commandId: null,
       });
       for (const item of turn.items) {
-        const characters = Array.from(item.text);
+        // Scrubbed whole before it is cut, as the chat projector does, so no
+        // part carries a token in pieces that the scrub of each part would miss.
+        const text = this.config.redactions ? this.config.redactions.text(item.text) : item.text;
+        const title = this.config.redactions ? this.config.redactions.text(item.title) : item.title;
+        const characters = Array.from(text);
         const parts = Math.max(1, Math.ceil(characters.length / ITEM_PART_CHARACTERS));
         for (let index = 0; index < parts; index++)
-          await this.publish({
+          bodies.push({
             type: 'item.upsert',
             item: {
               itemId: index === 0 ? item.itemId : `${item.itemId}:part:${index}`,
@@ -448,7 +458,7 @@ export class HostedSession {
               revision: 1,
               kind: item.kind,
               status: item.status,
-              title: item.title.slice(0, ITEM_PART_CHARACTERS),
+              title: Array.from(title).slice(0, ITEM_PART_CHARACTERS).join(''),
               text: characters
                 .slice(index * ITEM_PART_CHARACTERS, (index + 1) * ITEM_PART_CHARACTERS)
                 .join(''),
@@ -458,12 +468,15 @@ export class HostedSession {
           });
       }
     }
-    const hidden = turns.length - shown.length;
+    for (let start = 0; start < bodies.length; start += HISTORY_BATCH)
+      await this.publishBatch(bodies.slice(start, start + HISTORY_BATCH));
+    const total = turns.reduce((count, turn) => count + turn.items.length, 0);
+    const kept = shown.reduce((count, turn) => count + turn.items.length, 0);
     await this.publish({
       type: 'notice',
       level: 'info',
       code: 'HISTORY_IMPORTED',
-      message: `${hidden > 0 ? `Above are the last ${shown.length} turns of the conversation this session continues; ${hidden} earlier ${hidden === 1 ? 'turn is' : 'turns are'} not shown here.` : 'Above is the conversation this session continues.'} It was copied when the session started, and the agent has all of it. The original is unchanged.`,
+      message: `${kept < total ? `Above are the last ${kept} of the ${total} messages and tool calls in the conversation this session continues; the earlier ones are not shown here.` : 'Above is the conversation this session continues.'} It was copied when the session started, and the agent has all of it. The original is unchanged.`,
     });
     await this.inbox.append({ type: 'history-imported' });
     this.historyImported = true;
@@ -1368,23 +1381,33 @@ export class HostedSession {
     return bodies.reduce((tail, body) => tail.then(() => this.publish(body)), Promise.resolve());
   }
   private publish(body: ServerEvent['body']): Promise<void> {
+    return this.publishBatch([body]);
+  }
+  /** Publishes events in order, recorded with one write to the journal. */
+  private publishBatch(bodies: ServerEvent['body'][]): Promise<void> {
     const pending = this.publishing.then(async () => {
-      const event: ServerEvent = {
-        contractVersion: 1,
-        eventId: randomUUID(),
-        sessionId: this.config.session.sessionId,
-        sequence: this.events.records.length + 1,
-        occurredAt: new Date().toISOString(),
-        // Scrubbed here, once: the journal, Console's view and the activity
-        // rows Switch shows on the bridges are all made from what is recorded.
-        body: this.config.redactions ? this.config.redactions.value(body) : body,
-      };
-      if (eventBytes(event) > 64 * 1024)
-        throw new Error('PAYLOAD_TOO_LARGE: event exceeds 64 KiB.');
-      serverEventSchema.parse(event);
-      await this.events.append(event);
-      this.replica.apply(event);
-      for (const listener of this.listeners) listener(event);
+      const occurredAt = new Date().toISOString();
+      const events = bodies.map((body, index) => {
+        const event: ServerEvent = {
+          contractVersion: 1,
+          eventId: randomUUID(),
+          sessionId: this.config.session.sessionId,
+          sequence: this.events.records.length + 1 + index,
+          occurredAt,
+          // Scrubbed here, once: the journal, Console's view and the activity
+          // rows Switch shows on the bridges are all made from what is recorded.
+          body: this.config.redactions ? this.config.redactions.value(body) : body,
+        };
+        if (eventBytes(event) > 64 * 1024)
+          throw new Error('PAYLOAD_TOO_LARGE: event exceeds 64 KiB.');
+        serverEventSchema.parse(event);
+        return event;
+      });
+      await this.events.appendAll(events);
+      for (const event of events) {
+        this.replica.apply(event);
+        for (const listener of this.listeners) listener(event);
+      }
     });
     this.publishing = pending.catch(() => {});
     return pending;
@@ -1432,8 +1455,8 @@ export class HostedSession {
 
 /** How many items of a continued conversation's earlier turns a transcript starts with. */
 const HISTORY_ITEM_LIMIT = 500;
-/** As much text as one published item carries, as the chat projector splits it. */
-const ITEM_PART_CHARACTERS = 4096;
+/** How many of a continued conversation's events are recorded with one journal write. */
+const HISTORY_BATCH = 100;
 
 /**
  * The most recent turns that together hold no more than `limit` items, oldest

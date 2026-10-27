@@ -115,14 +115,27 @@ describe('createSession', () => {
     if (!result.success) throw new Error('Expected session creation to succeed');
     expect(mocks.forkCliConversation).toHaveBeenCalledWith(
       expect.objectContaining({ dir: '/repo' }),
+      { id: 'session-1', title: 'Test Session' },
       'cli-1'
     );
+    // The row exists before the copy is made, so the copy always has an owner.
+    expect(mocks.insert.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.forkCliConversation.mock.invocationCallOrder[0]!
+    );
+    expect(mocks.set).toHaveBeenCalledWith({
+      config: { cliConversation, providerSessionId: 'copy-1' },
+    });
     expect(result.data.session.providerSessionId).toBe('copy-1');
     expect(result.data.session.cliConversation).toEqual(cliConversation);
-    expect(mocks.startSession).toHaveBeenCalledTimes(1);
+    expect(mocks.startSession).toHaveBeenCalledWith(
+      expect.objectContaining({ providerSessionId: 'copy-1' }),
+      false,
+      undefined,
+      null
+    );
   });
 
-  it('creates no session when the CLI conversation cannot be copied', async () => {
+  it('takes the session away again when the CLI conversation cannot be copied', async () => {
     mocks.forkCliConversation.mockRejectedValue(
       new Error(
         'This conversation is open in Claude Code (process 41). Close it there, then try again.'
@@ -140,7 +153,8 @@ describe('createSession', () => {
           'This conversation is open in Claude Code (process 41). Close it there, then try again.',
       },
     });
-    expect(mocks.insert).not.toHaveBeenCalled();
+    expect(mocks.deleteFn).toHaveBeenCalledTimes(1);
+    expect(mocks.startSession).not.toHaveBeenCalled();
   });
 
   it('refuses to continue a CLI conversation for an agent that is not Claude Code', async () => {

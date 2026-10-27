@@ -173,7 +173,10 @@ export {
   forkedCliConversationSchema,
   type CliConversationList,
 } from './claude/cli-conversations';
-export { cliConversationFailureSchema } from './host/cli-conversations';
+export {
+  cliConversationFailureSchema,
+  type CliConversationRequest,
+} from './host/cli-conversations';
 export { verifyClaudeSignIn } from './claude/sign-in';
 export type { ProviderReadiness, SignInCheckInput } from './readiness';
 export {

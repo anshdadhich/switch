@@ -7,6 +7,7 @@ import {
   type CliConversationDeps,
   forkClaudeCliConversation,
   listClaudeCliConversations,
+  type ProcessInfo,
 } from './cli-conversations';
 
 const roots: string[] = [];
@@ -15,47 +16,51 @@ afterEach(async () => {
 });
 
 const STARTED = 'Mon Oct 26 18:02:59 2026';
+const STARTED_AT = Date.parse(`${STARTED} UTC`);
+const CLAUDE: ProcessInfo = { startedAt: STARTED_AT, command: '/usr/local/bin/claude --resume' };
 
 const SESSIONS: SDKSessionInfo[] = [
   { sessionId: 'older', summary: 'Tidy the README', lastModified: 1_000, gitBranch: 'main' },
-  {
-    sessionId: 'newer',
-    summary: 'Fix the build',
-    customTitle: 'Build fix',
-    lastModified: 2_000,
-  },
+  { sessionId: 'newer', summary: 'Build fix', customTitle: 'Build fix', lastModified: 2_000 },
 ];
 
-/** A Claude Code config directory, with a process record for each of `holders`. */
-async function configDir(
-  holders: { pid: number; sessionId: string; procStart?: string }[] | null
-): Promise<string> {
+/** A Claude Code config directory, with each of `records` written as `sessions/<name>`. */
+async function configDir(records: Record<string, string | object> | null): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), 'claude-config-'));
   roots.push(dir);
-  if (holders) {
+  if (records) {
     await mkdir(join(dir, 'sessions'));
-    for (const holder of holders)
+    for (const [name, record] of Object.entries(records))
       await writeFile(
-        join(dir, 'sessions', `${holder.pid}.json`),
-        JSON.stringify({ ...holder, entrypoint: 'cli', status: 'idle' })
+        join(dir, 'sessions', name),
+        typeof record === 'string' ? record : JSON.stringify(record)
       );
   }
   return dir;
 }
 
-function deps(overrides: Partial<CliConversationDeps> = {}): CliConversationDeps {
+function holding(sessionId: string, extra: object = {}) {
+  return { sessionId, procStart: STARTED, entrypoint: 'cli', status: 'idle', ...extra };
+}
+
+function deps(
+  described: Record<number, ProcessInfo> | null = {},
+  overrides: Partial<CliConversationDeps> = {}
+): CliConversationDeps {
   return {
     listSessions: vi.fn(async () => structuredClone(SESSIONS)),
     forkSession: vi.fn(async () => ({ sessionId: 'copy' })),
     processExists: () => true,
-    processStart: async () => STARTED,
+    processes: vi.fn(async () =>
+      described === null ? null : new Map(Object.entries(described).map(([k, v]) => [Number(k), v]))
+    ),
     ...overrides,
   };
 }
 
 it('lists the conversations started from Claude Code’s own clients, newest first, with what holds each', async () => {
-  const dir = await configDir([{ pid: 41, sessionId: 'newer', procStart: STARTED }]);
-  const run = deps();
+  const dir = await configDir({ '41.json': holding('newer'), '41.abc.key': 'not a record' });
+  const run = deps({ 41: CLAUDE });
   const list = await listClaudeCliConversations('/work', { CLAUDE_CONFIG_DIR: dir }, run);
 
   expect(run.listSessions).toHaveBeenCalledWith({
@@ -84,33 +89,79 @@ it('lists the conversations started from Claude Code’s own clients, newest fir
   });
 });
 
-it('does not count a record whose process has gone, or whose process id now names another process', async () => {
-  const dir = await configDir([
-    { pid: 41, sessionId: 'newer', procStart: STARTED },
-    { pid: 42, sessionId: 'older', procStart: STARTED },
-  ]);
-  const list = await listClaudeCliConversations(
+it('reads conversations from the config directory the session’s environment names', async () => {
+  const dir = await configDir({});
+  const seen: (string | undefined)[] = [];
+  const before = process.env.CLAUDE_CONFIG_DIR;
+  await listClaudeCliConversations(
     '/work',
     { CLAUDE_CONFIG_DIR: dir },
-    deps({
-      processExists: (pid) => pid === 42,
-      processStart: async () => 'Tue Oct 27 09:00:00 2026',
-    })
+    deps(
+      {},
+      {
+        listSessions: vi.fn(async () => {
+          seen.push(process.env.CLAUDE_CONFIG_DIR);
+          return [];
+        }),
+      }
+    )
   );
-  expect(list.conversations.map((c) => c.openIn)).toEqual([null, null]);
+  expect(seen).toEqual([dir]);
+  expect(process.env.CLAUDE_CONFIG_DIR).toBe(before);
 });
 
-it('takes a live process to hold its conversation when its start cannot be compared', async () => {
-  const dir = await configDir([
-    { pid: 41, sessionId: 'newer', procStart: STARTED },
-    { pid: 42, sessionId: 'older', procStart: '2026-10-26T18:02:59Z' },
-  ]);
+it('keeps a live Claude Code process holding its conversation when the clock has moved its start', async () => {
+  const dir = await configDir({ '41.json': holding('newer') });
   const list = await listClaudeCliConversations(
     '/work',
     { CLAUDE_CONFIG_DIR: dir },
-    deps({ processStart: async (pid) => (pid === 41 ? null : 'Tue Oct 27 09:00:00 2026') })
+    deps({ 41: { ...CLAUDE, startedAt: STARTED_AT + 3_600_000 } })
   );
+  expect(list.conversations[0]!.openIn?.pid).toBe(41);
+});
+
+it('does not count a record whose process has gone, or whose process id now names something else', async () => {
+  const dir = await configDir({ '41.json': holding('newer'), '42.json': holding('older') });
+  const run = deps(
+    { 42: { startedAt: STARTED_AT + 86_400_000, command: '/bin/zsh -c cat ~/.claude/notes' } },
+    { processExists: (pid) => pid === 42 }
+  );
+  const list = await listClaudeCliConversations('/work', { CLAUDE_CONFIG_DIR: dir }, run);
+  expect(list.conversations.map((c) => c.openIn)).toEqual([null, null]);
+  expect(list.ownershipKnown).toBe(true);
+});
+
+it('asks `ps` about every live process at once, and takes one it cannot describe to hold its conversation', async () => {
+  const dir = await configDir({ '41.json': holding('newer'), '42.json': holding('older') });
+  const run = deps(null);
+  const list = await listClaudeCliConversations('/work', { CLAUDE_CONFIG_DIR: dir }, run);
+  expect(run.processes).toHaveBeenCalledOnce();
+  expect([...vi.mocked(run.processes).mock.calls[0]![0]].sort((a, b) => a - b)).toEqual([41, 42]);
   expect(list.conversations.map((c) => c.openIn?.pid)).toEqual([41, 42]);
+});
+
+it('says ownership is unknown when a live Claude Code process’s record cannot be read', async () => {
+  const dir = await configDir({ '41.json': '{"sessionId": "new', '42.json': holding('older') });
+  const list = await listClaudeCliConversations(
+    '/work',
+    { CLAUDE_CONFIG_DIR: dir },
+    deps({ 41: CLAUDE, 42: CLAUDE })
+  );
+  expect(list.ownershipKnown).toBe(false);
+  expect(list.conversations.map((c) => c.openIn?.pid ?? null)).toEqual([null, 42]);
+});
+
+it('reads a record in a shape it does not fully know, as long as it names the conversation', async () => {
+  const dir = await configDir({
+    '41.json': { sessionId: 'newer', procStart: 7, entrypoint: null },
+  });
+  const list = await listClaudeCliConversations(
+    '/work',
+    { CLAUDE_CONFIG_DIR: dir },
+    deps({ 41: CLAUDE })
+  );
+  expect(list.ownershipKnown).toBe(true);
+  expect(list.conversations[0]!.openIn).toEqual({ pid: 41, entrypoint: null });
 });
 
 it('says when this Claude Code keeps no record of what its processes hold', async () => {
@@ -121,8 +172,17 @@ it('says when this Claude Code keeps no record of what its processes hold', asyn
 });
 
 it('copies a closed conversation under a new id, titled so Claude Code’s own list shows it is taken', async () => {
-  const dir = await configDir([]);
-  const run = deps();
+  const dir = await configDir({});
+  const seen: (string | undefined)[] = [];
+  const run = deps(
+    {},
+    {
+      forkSession: vi.fn(async () => {
+        seen.push(process.env.CLAUDE_CONFIG_DIR);
+        return { sessionId: 'copy' };
+      }),
+    }
+  );
   await expect(
     forkClaudeCliConversation('/work', 'newer', { CLAUDE_CONFIG_DIR: dir }, run)
   ).resolves.toEqual({ nativeSessionId: 'copy' });
@@ -130,11 +190,12 @@ it('copies a closed conversation under a new id, titled so Claude Code’s own l
     dir: '/work',
     title: 'Build fix (continued in Switch Console)',
   });
+  expect(seen).toEqual([dir]);
 });
 
 it('refuses to copy a conversation that is open in Claude Code', async () => {
-  const dir = await configDir([{ pid: 41, sessionId: 'newer', procStart: STARTED }]);
-  const run = deps();
+  const dir = await configDir({ '41.json': holding('newer') });
+  const run = deps({ 41: CLAUDE });
   await expect(
     forkClaudeCliConversation('/work', 'newer', { CLAUDE_CONFIG_DIR: dir }, run)
   ).rejects.toThrow('This conversation is open in Claude Code (process 41)');
@@ -142,7 +203,7 @@ it('refuses to copy a conversation that is open in Claude Code', async () => {
 });
 
 it('refuses a conversation that is not one of the folder’s own', async () => {
-  const dir = await configDir([]);
+  const dir = await configDir({});
   const run = deps();
   await expect(
     forkClaudeCliConversation('/work', 'elsewhere', { CLAUDE_CONFIG_DIR: dir }, run)

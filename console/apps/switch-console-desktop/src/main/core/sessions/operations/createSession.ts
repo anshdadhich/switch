@@ -60,17 +60,6 @@ export async function createSession(
         type: 'spawn-failed',
         message: 'Only Claude Code agents can continue a conversation started in its CLI.',
       });
-    // Copied before the session exists, so a conversation that cannot be
-    // continued (open in a terminal, say) leaves no session behind. The copy
-    // is what the session resumes; the CLI's own conversation is never written.
-    try {
-      configObj.providerSessionId = await forkCliConversation(
-        location,
-        params.cliConversation.nativeSessionId
-      );
-    } catch (e) {
-      return err({ type: 'spawn-failed', message: e instanceof Error ? e.message : String(e) });
-    }
     configObj.cliConversation = params.cliConversation;
   }
   // The session's launch identity is not stored — it is read live from the
@@ -99,10 +88,31 @@ export async function createSession(
   // as a Result instead of a raw UNIQUE-constraint throw.
   if (!row) return err({ type: 'already-exists' });
 
-  const session = mapSessionRowToSession(row, agent.providerId, agent.name);
+  let session = mapSessionRowToSession(row, agent.providerId, agent.name);
 
   if (adopted) return ok({ session });
   if (!location) return err({ type: 'agent-not-found' });
+  if (params.cliConversation) {
+    // Copied once the session's row holds its id, so no copy is left without
+    // a session to own it, and one that cannot be made (open in a terminal,
+    // say) takes the row away again. The copy is what the session resumes;
+    // the CLI's own conversation is never written to.
+    try {
+      const providerSessionId = await forkCliConversation(
+        location,
+        { id: session.id, title: session.title },
+        params.cliConversation.nativeSessionId
+      );
+      await db
+        .update(sessions)
+        .set({ config: { ...configObj, providerSessionId } })
+        .where(eq(sessions.id, session.id));
+      session = { ...session, providerSessionId };
+    } catch (e) {
+      await db.delete(sessions).where(eq(sessions.id, session.id));
+      return err({ type: 'spawn-failed', message: e instanceof Error ? e.message : String(e) });
+    }
+  }
   try {
     const built = await provisionSessionRuntime(session, location);
     await sessionRuntimeManager.registerSession(session.id, built, location.ctx);
