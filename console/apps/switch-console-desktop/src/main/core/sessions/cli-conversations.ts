@@ -65,19 +65,21 @@ export async function listCliConversations(
 /**
  * Copies a conversation started in Claude Code's CLI for `session` to continue,
  * and returns the copy's id. Refused while a Claude Code process has the
- * conversation open. Part of starting the session, so it deploys this build's
+ * conversation open, or, where Claude Code cannot say, unless the person said
+ * it is closed. Part of starting the session, so it deploys this build's
  * bundle to an SSH host that lacks it.
  */
 export async function forkCliConversation(
   location: LocationProvider,
   session: { id: string; title: string },
-  nativeSessionId: string
+  nativeSessionId: string,
+  confirmedClosed: boolean
 ): Promise<string> {
   const request = await conversationRequest(location, session);
   const fork = await runConversationRequest(
     location,
     '--fork-cli-conversation',
-    { ...request, nativeSessionId },
+    { ...request, nativeSessionId, confirmedClosed },
     { deploy: true, timeout: FORK_TIMEOUT_MS },
     forkedCliConversationSchema
   );

@@ -346,6 +346,7 @@ export const CreateSessionModal = observer(function CreateSessionModal({
               cliConversation: {
                 nativeSessionId: cliConversation.nativeSessionId,
                 title: cliConversation.title,
+                confirmedClosed,
               },
             }
           : {}),

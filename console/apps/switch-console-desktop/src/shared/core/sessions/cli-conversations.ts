@@ -1,3 +1,7 @@
+// The renderer's view of `cliConversationListSchema` (agent-providers). The main
+// process parses the host's answer with that schema and returns it as this type,
+// so the two cannot drift apart without that failing to compile.
+
 /** A conversation started in Claude Code's own CLI, as the new-session dialog offers it. */
 export type CliConversation = {
   nativeSessionId: string;

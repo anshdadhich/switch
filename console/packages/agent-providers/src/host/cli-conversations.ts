@@ -29,6 +29,11 @@ export const cliConversationRequestSchema = z.strictObject({
   inheritEnv: z.array(z.string()),
   /** The conversation to copy, for `--fork-cli-conversation`. */
   nativeSessionId: z.string().min(1).optional(),
+  /**
+   * The person said the conversation is closed, for a copy where Claude Code
+   * cannot say which conversations are open. Absent means they did not.
+   */
+  confirmedClosed: z.boolean().optional(),
 });
 export type CliConversationRequest = z.infer<typeof cliConversationRequestSchema>;
 
@@ -50,5 +55,10 @@ export async function answerCliConversationRequest(
   );
   if (mode === '--cli-conversations') return listClaudeCliConversations(request.dir, env);
   if (!request.nativeSessionId) throw new Error('Name the conversation to copy.');
-  return forkClaudeCliConversation(request.dir, request.nativeSessionId, env);
+  return forkClaudeCliConversation(
+    request.dir,
+    request.nativeSessionId,
+    request.confirmedClosed === true,
+    env
+  );
 }

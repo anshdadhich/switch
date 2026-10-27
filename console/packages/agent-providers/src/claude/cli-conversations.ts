@@ -53,7 +53,8 @@ const holderRecordSchema = z.object({
  * SDK package's script. Not any mention of the word, which a shell running a
  * script about `~/.claude` would make.
  */
-const CLAUDE_COMMAND = /(?:^|[/\\\s])claude(?:\.exe)?(?:\s|$)|@anthropic-ai\/claude-(?:code|agent-sdk)\//;
+const CLAUDE_COMMAND =
+  /(?:^|[/\\\s])claude(?:\.exe)?(?:\s|$)|@anthropic-ai\/claude-(?:code|agent-sdk)\//;
 
 /** How far apart a record's start time and its process's may be and still be the same process. */
 const START_TOLERANCE_MS = 5_000;
@@ -82,7 +83,9 @@ const defaultDeps: CliConversationDeps = {
 /**
  * The conversations started in `dir` from Claude Code's own terminal or IDE
  * clients, with the process that has each one open. Conversations a program
- * started through the SDK, Switch's own sessions among them, are left out.
+ * started through the SDK, Switch's own sessions among them, are left out, and
+ * so are the copies Switch made to continue: one whose session went away, or
+ * whose copy finished after Console stopped waiting, is not a CLI conversation.
  *
  * `env` is the session's execution environment, so the conversations are
  * looked for in the config directory the session's Claude Code will use.
@@ -100,7 +103,8 @@ export async function listClaudeCliConversations(
   ]);
   return {
     ownershipKnown: ownership !== null && ownership.complete,
-    conversations: [...sessions]
+    conversations: sessions
+      .filter((session) => !session.summary.endsWith(FORK_TITLE_SUFFIX))
       .sort((a, b) => b.lastModified - a.lastModified)
       .map((session) => ({
         nativeSessionId: session.sessionId,
@@ -116,18 +120,26 @@ export async function listClaudeCliConversations(
  * A copy of a Claude Code conversation under a new id, for a Switch session to
  * continue: the original stays the terminal's, and nothing Switch does is
  * written to it. Refused while a running Claude Code process has it open, so
- * the copy is never taken from the middle of a turn.
+ * the copy is never taken from the middle of a turn; and, where Claude Code
+ * cannot say which conversations are open, unless the person said this one
+ * is closed (`confirmedClosed`).
  */
 export async function forkClaudeCliConversation(
   dir: string,
   nativeSessionId: string,
+  confirmedClosed: boolean,
   env: Record<string, string | undefined>,
   deps: CliConversationDeps = defaultDeps
 ): Promise<{ nativeSessionId: string }> {
-  const holder = (await claudeHolders(claudeConfigDir(env), deps))?.holders.get(nativeSessionId);
+  const ownership = await claudeHolders(claudeConfigDir(env), deps);
+  const holder = ownership?.holders.get(nativeSessionId);
   if (holder)
     throw new Error(
       `This conversation is open in Claude Code (process ${holder.pid}). Close it there, then try again.`
+    );
+  if ((ownership === null || !ownership.complete) && !confirmedClosed)
+    throw new Error(
+      'Console cannot tell whether this conversation is open in Claude Code right now. Choose it again and confirm it is closed.'
     );
   return withClaudeConfigDir(env, async () => {
     const listed = await deps.listSessions({
@@ -151,24 +163,34 @@ export function claudeConfigDir(env: Record<string, string | undefined>): string
   return env.CLAUDE_CONFIG_DIR || join(env.HOME || homedir(), '.claude');
 }
 
+/** The last `withClaudeConfigDir` call to settle; each waits for the one before. */
+let configDirTurn: Promise<unknown> = Promise.resolve();
+
 /**
  * Runs `work` with this process's `CLAUDE_CONFIG_DIR` naming the directory
  * `env` gives Claude Code. The SDK's readers of saved conversations take the
  * directory from this process's environment, with no option to name another,
- * and remember it per value of the variable, so setting it is enough.
+ * and remember it per value of the variable, so setting it is enough. Calls
+ * take turns, since the variable is the whole process's: overlapping ones
+ * would each read with the other's directory and restore the wrong value. Not
+ * to be nested: an inner call would wait for the outer one for ever.
  */
-export async function withClaudeConfigDir<T>(
+export function withClaudeConfigDir<T>(
   env: Record<string, string | undefined>,
   work: () => Promise<T>
 ): Promise<T> {
-  const previous = process.env.CLAUDE_CONFIG_DIR;
-  process.env.CLAUDE_CONFIG_DIR = claudeConfigDir(env);
-  try {
-    return await work();
-  } finally {
-    if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;
-    else process.env.CLAUDE_CONFIG_DIR = previous;
-  }
+  const run = configDirTurn.then(async () => {
+    const previous = process.env.CLAUDE_CONFIG_DIR;
+    process.env.CLAUDE_CONFIG_DIR = claudeConfigDir(env);
+    try {
+      return await work();
+    } finally {
+      if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+      else process.env.CLAUDE_CONFIG_DIR = previous;
+    }
+  });
+  configDirTurn = run.catch(() => {});
+  return run;
 }
 
 /**

@@ -60,7 +60,10 @@ export async function createSession(
         type: 'spawn-failed',
         message: 'Only Claude Code agents can continue a conversation started in its CLI.',
       });
-    configObj.cliConversation = params.cliConversation;
+    configObj.cliConversation = {
+      nativeSessionId: params.cliConversation.nativeSessionId,
+      title: params.cliConversation.title,
+    };
   }
   // The session's launch identity is not stored — it is read live from the
   // owning agent's `name` (see mapSessionRowToSession). How that name spawns is
@@ -101,7 +104,8 @@ export async function createSession(
       const providerSessionId = await forkCliConversation(
         location,
         { id: session.id, title: session.title },
-        params.cliConversation.nativeSessionId
+        params.cliConversation.nativeSessionId,
+        params.cliConversation.confirmedClosed
       );
       await db
         .update(sessions)

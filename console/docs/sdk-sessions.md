@@ -125,17 +125,21 @@ Code conversations can be continued; Codex runs each session in a private
 Conversations are looked for where the session's Claude Code will look: the
 host applies the agent's shell setup and inherited variables, as it does before
 starting the provider, so a `CLAUDE_CONFIG_DIR` set there is honoured. Console
-sends that request as a private file staged beside a launch's configuration,
-not on a command line. Listing only reads the host. On an SSH host that does not
-yet have this Console's host bundle the dialog says so instead of deploying it;
-starting a session, which copies the conversation, deploys it as any launch does.
+sends that request as a private file, in a directory only the user can read
+beside a launch's configuration, not on a command line. Listing only reads the
+host. On an SSH host that does not yet have this Console's host bundle the
+dialog says so instead of deploying it; starting a session, which copies the
+conversation, deploys it as any launch does. A Room watcher older than this
+Console cannot start such a session, and Console says to update it.
 
 The session never writes to the CLI's conversation. Starting the session copies
 it under a new id (the SDK's `forkSession`), and the session resumes the copy.
 The session is recorded before the copy is made and removed again if the copy
-fails, so no copy is left without a session. The copy is titled
+fails. A session whose copy was never recorded (Console stopped while copying)
+refuses to start rather than open a new conversation. The copy is titled
 `… (continued in Switch Console)`, so Claude Code's own `/resume` list shows it
-is taken. The original stays the terminal's. Continuing it there afterwards
+is taken, and the dialog never offers such copies, including one whose session
+is gone or that finished after Console stopped waiting. The original stays the terminal's. Continuing it there afterwards
 starts a separate branch that does not include what happened in Console.
 
 A conversation that a running Claude Code process has open cannot be picked, and
@@ -148,19 +152,26 @@ else no longer holds the conversation unless it started at the recorded time
 (`ps -o lstart=` in UTC). A live process `ps` cannot describe is taken to hold
 its conversation. When a live Claude Code process's record cannot be read, or
 this Claude Code keeps no records, the dialog asks for confirmation that the
-conversation is closed.
+conversation is closed, and the copy is refused without it: the check runs
+again when the copy is made.
 
 No earlier prompt is sent again. Before the provider starts, the session's
 transcript is filled with the copy's earlier turns, up to the last 500 items:
 prompts, slash and `!` commands as they were typed, Claude's replies, and the
 tools it ran, with a failed tool marked as failed. Reasoning, subagents' own
-messages, the context Claude Code adds on its own and its notes that a turn was
-stopped are left out, as they are from a live transcript. Where the conversation
+messages, the context Claude Code adds on its own (in its own tags; markup a
+person pasted stays) and its notes that a turn was stopped are left out, as
+they are from a live transcript. Imported turns carry ids starting
+`imported:` (`isImportedTurn` in `@switch-console/shared/session-v1`), and
+nothing that asks whether a session has run anything counts them: its
+initial prompt is still delivered, its first room message still opens the
+conversation, and its agent instructions are not announced as changed. Where the conversation
 was compacted, an item marks it instead of showing the summary as a prompt.
 Text is scrubbed of service tokens before it is cut into parts. A notice after
-those turns says how many items were not shown. The host records the import
-once it is done; an import cut short by a crash runs again and republishes the
-same items under the same ids. If the conversation cannot be read, a warning
+those turns says how many items were not shown, and settles the import: the
+host reads it back from its event journal on restart. Items are recorded in
+batches bounded in count and bytes. An import cut short by a crash runs again
+and publishes only what it had not. If the conversation cannot be read, a warning
 says so once and the session goes on to resume it, which decides whether it is
 there. Because the session continues a conversation that already had answers, a
 copy that cannot be resumed is never quietly replaced with a new conversation.

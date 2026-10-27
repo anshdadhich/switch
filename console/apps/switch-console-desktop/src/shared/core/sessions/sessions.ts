@@ -75,8 +75,10 @@ export type CreateSessionParams = {
   /**
    * Continue this conversation, started in Claude Code's own CLI in the agent's
    * folder. The session runs a copy of it, so the CLI's own is left alone.
+   * `confirmedClosed`: the person said it is closed, which a copy needs where
+   * Claude Code cannot say which conversations are open.
    */
-  cliConversation?: ContinuedCliConversation;
+  cliConversation?: ContinuedCliConversation & { confirmedClosed: boolean };
   /**
    * Which control the user started the session from, for reporting. Omitted by
    * callers with no user behind them, which report as `unknown`.

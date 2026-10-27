@@ -110,13 +110,17 @@ describe('createSession', () => {
   it('continues a copy of a CLI conversation, recording which one it continues', async () => {
     mocks.forkCliConversation.mockResolvedValue('copy-1');
     const cliConversation = { nativeSessionId: 'cli-1', title: 'Fix the build' };
-    const result = await createSession({ ...baseParams, cliConversation });
+    const result = await createSession({
+      ...baseParams,
+      cliConversation: { ...cliConversation, confirmedClosed: true },
+    });
     expect(result.success).toBe(true);
     if (!result.success) throw new Error('Expected session creation to succeed');
     expect(mocks.forkCliConversation).toHaveBeenCalledWith(
       expect.objectContaining({ dir: '/repo' }),
       { id: 'session-1', title: 'Test Session' },
-      'cli-1'
+      'cli-1',
+      true
     );
     // The row exists before the copy is made, so the copy always has an owner.
     expect(mocks.insert.mock.invocationCallOrder[0]).toBeLessThan(
@@ -143,7 +147,7 @@ describe('createSession', () => {
     );
     const result = await createSession({
       ...baseParams,
-      cliConversation: { nativeSessionId: 'cli-1', title: 'Fix the build' },
+      cliConversation: { nativeSessionId: 'cli-1', title: 'Fix the build', confirmedClosed: false },
     });
     expect(result).toEqual({
       success: false,
@@ -165,7 +169,7 @@ describe('createSession', () => {
     });
     const result = await createSession({
       ...baseParams,
-      cliConversation: { nativeSessionId: 'cli-1', title: 'Fix the build' },
+      cliConversation: { nativeSessionId: 'cli-1', title: 'Fix the build', confirmedClosed: false },
     });
     expect(result.success).toBe(false);
     expect(mocks.forkCliConversation).not.toHaveBeenCalled();

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { appendFile, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { appendFile, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Command, Session } from '@switch-console/shared/session-v1';
@@ -639,15 +639,15 @@ it('starts a continued conversation’s transcript with its earlier turns, befor
   );
   const snapshot = host.snapshot();
   expect(snapshot.turns).toEqual([
-    { type: 'turn.upsert', turnId: 'cli:prompt-1', status: 'completed', commandId: null },
+    { type: 'turn.upsert', turnId: 'imported:cli:prompt-1', status: 'completed', commandId: null },
   ]);
   expect(
     snapshot.items.map((item) => [item.itemId, item.kind, item.status, item.text.length])
   ).toEqual([
-    ['cli:prompt-1', 'user-message', 'completed', 13],
-    ['cli:answer-1:0', 'tool-activity', 'failed', 0],
-    ['cli:answer-1:1', 'assistant-message', 'completed', 4096],
-    ['cli:answer-1:1:part:1', 'assistant-message', 'completed', 904],
+    ['imported:cli:prompt-1', 'user-message', 'completed', 13],
+    ['imported:cli:answer-1:0', 'tool-activity', 'failed', 0],
+    ['imported:cli:answer-1:1', 'assistant-message', 'completed', 4096],
+    ['imported:cli:answer-1:1:part:1', 'assistant-message', 'completed', 904],
   ]);
   expect(snapshot.items.every((item) => item.origin === null && item.revision === 1)).toBe(true);
   expect(snapshot.notices.map((notice) => notice.code)).toContain('HISTORY_IMPORTED');
@@ -762,6 +762,45 @@ it('says how much of a continued conversation it left out, a long latest turn in
       message: expect.stringContaining('the last 500 of the 600 messages and tool calls'),
     })
   );
+});
+
+it('refuses to start a continued session that has no copy to resume, rather than start afresh', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'sdk-history-test-'));
+  roots.push(root);
+  const fixture = continuing('claude', async () => structuredClone(CLI_TURNS));
+  const { resume: _resume, ...input } = fixture.config.input;
+  await expect(startHost(root, { ...fixture.config, input }, fixture.adapter)).rejects.toThrow(
+    'no copy of it was recorded to resume'
+  );
+  expect(fixture.adapter.startSession).not.toHaveBeenCalled();
+});
+
+it('finishes an import a crash cut short without republishing what it had published', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'sdk-history-test-'));
+  roots.push(root);
+  const fixture = continuing('claude', async () => structuredClone(CLI_TURNS));
+  const host = await startHost(root, fixture.config, fixture.adapter);
+  hosts.push(host);
+  await until(() => expect(host.snapshot().session.status).toBe('ready'));
+  await host.shutdown();
+  hosts.splice(hosts.indexOf(host), 1);
+  // As if the host died after the history but before the notice that settles it.
+  const journal = join(root, 'events.jsonl');
+  const lines = (await readFile(journal, 'utf8')).split('\n').filter(Boolean);
+  const settled = lines.findIndex((line) => line.includes('HISTORY_IMPORTED'));
+  await writeFile(journal, `${lines.slice(0, settled).join('\n')}\n`);
+  const before = (await readFile(journal, 'utf8')).split('\n').filter(Boolean).length;
+  // A token issued since would make republished text differ from what is there.
+  const redactions = new Redactions();
+  redactions.add('x'.repeat(40));
+  const next = continuing('claude', async () => structuredClone(CLI_TURNS));
+  const restarted = await startHost(root, { ...next.config, redactions }, next.adapter);
+  hosts.push(restarted);
+  await until(() => expect(restarted.snapshot().session.status).toBe('ready'));
+  expect(next.adapter.conversationHistory).toHaveBeenCalledOnce();
+  const events = (await readFile(journal, 'utf8')).split('\n').filter(Boolean).slice(before);
+  expect(events.filter((line) => line.includes('"item.upsert"'))).toEqual([]);
+  expect(restarted.snapshot().notices.map((notice) => notice.code)).toContain('HISTORY_IMPORTED');
 });
 
 it('keeps the most recent whole turns of a long conversation', () => {

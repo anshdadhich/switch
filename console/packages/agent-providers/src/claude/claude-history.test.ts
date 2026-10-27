@@ -41,31 +41,31 @@ it('turns a Claude Code transcript into turns that start at each prompt someone 
 
   expect(turns).toEqual([
     {
-      turnId: 'cli:u1',
+      turnId: 'u1',
       items: [
         {
-          itemId: 'cli:u1',
+          itemId: 'u1',
           kind: 'user-message',
           status: 'completed',
           title: '',
           text: 'Why does the build fail?',
         },
         {
-          itemId: 'cli:a1:1',
+          itemId: 'a1:1',
           kind: 'assistant-message',
           status: 'completed',
           title: '',
           text: 'Checking the build.',
         },
         {
-          itemId: 'cli:a1:2',
+          itemId: 'a1:2',
           kind: 'tool-activity',
           status: 'failed',
           title: 'pnpm build',
           text: '',
         },
         {
-          itemId: 'cli:a2:0',
+          itemId: 'a2:0',
           kind: 'assistant-message',
           status: 'completed',
           title: '',
@@ -74,17 +74,17 @@ it('turns a Claude Code transcript into turns that start at each prompt someone 
       ],
     },
     {
-      turnId: 'cli:u2',
+      turnId: 'u2',
       items: [
         {
-          itemId: 'cli:u2',
+          itemId: 'u2',
           kind: 'user-message',
           status: 'completed',
           title: '',
           text: 'Fix it\n\n[image]',
         },
         {
-          itemId: 'cli:a3:0',
+          itemId: 'a3:0',
           kind: 'tool-activity',
           status: 'completed',
           title: 'Edit main.ts',
@@ -121,6 +121,7 @@ it('leaves out a stopped turn’s note and command output, and shows a ! command
     entry('user', 'b1', '<bash-input>git status</bash-input>'),
     entry('user', 'b2', '<bash-stdout>clean</bash-stdout><bash-stderr></bash-stderr>'),
     entry('user', 'p1', '<div> is not centred, why?'),
+    entry('user', 'p2', '<config><key>v</key></config>'),
   ]);
 
   expect(turns.map((turn) => turn.items.map((item) => item.text))).toEqual([
@@ -128,6 +129,7 @@ it('leaves out a stopped turn’s note and command output, and shows a ! command
     ['/review'],
     ['! git status'],
     ['<div> is not centred, why?'],
+    ['<config><key>v</key></config>'],
   ]);
 });
 

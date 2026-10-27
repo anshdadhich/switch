@@ -95,7 +95,7 @@ it('offers nothing for an agent that is not Claude Code', async () => {
 it('copies with the session’s own environment, deploying the host as a launch does', async () => {
   mocks.runHostRequest.mockResolvedValue({ stdout: '{"nativeSessionId":"copy-2"}\n', stderr: '' });
   await expect(
-    forkCliConversation(location as never, { id: 'session-1', title: 'Fix' }, 'cli-1')
+    forkCliConversation(location as never, { id: 'session-1', title: 'Fix' }, 'cli-1', true)
   ).resolves.toBe('copy-2');
   expect(mocks.resolveSessionEnv).toHaveBeenCalledWith(
     { id: 'session-1', title: 'Fix' },
@@ -108,6 +108,7 @@ it('copies with the session’s own environment, deploying the host as a launch 
     expect.objectContaining({
       env: { SWITCHDASH_SESSION_ID: 'session-1' },
       nativeSessionId: 'cli-1',
+      confirmedClosed: true,
     }),
     { deploy: true, timeout: 120_000 }
   );
@@ -120,7 +121,7 @@ it('throws the reason the host gave for refusing a copy, not that its command fa
     })
   );
   await expect(
-    forkCliConversation(location as never, { id: 'session-1', title: 'Fix' }, 'cli-1')
+    forkCliConversation(location as never, { id: 'session-1', title: 'Fix' }, 'cli-1', true)
   ).rejects.toThrow('This conversation is open in Claude Code (process 41)');
 });
 
@@ -128,6 +129,6 @@ it('passes on a failure the host did not explain', async () => {
   const failure = new Error('ssh: connection refused');
   mocks.runHostRequest.mockRejectedValue(failure);
   await expect(
-    forkCliConversation(location as never, { id: 'session-1', title: 'Fix' }, 'cli-1')
+    forkCliConversation(location as never, { id: 'session-1', title: 'Fix' }, 'cli-1', true)
   ).rejects.toBe(failure);
 });

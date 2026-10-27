@@ -1,7 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { accessSync, constants, existsSync } from 'node:fs';
 import { access, readdir, readFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { getSessionMessages, query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
 import type {
@@ -67,7 +66,7 @@ import {
   toolTitle,
   truncate,
 } from './claude-mapping';
-import { withClaudeConfigDir } from './cli-conversations';
+import { claudeConfigDir, withClaudeConfigDir } from './cli-conversations';
 
 const PROVIDER = 'claude';
 const ASK_USER_QUESTION = 'AskUserQuestion';
@@ -158,7 +157,7 @@ async function claudeConversationSaved(
   nativeSessionId: string,
   env: Record<string, string>
 ): Promise<boolean> {
-  const configDir = env.CLAUDE_CONFIG_DIR || join(env.HOME || homedir(), '.claude');
+  const configDir = claudeConfigDir(env);
   let projects: string[];
   try {
     projects = await readdir(join(configDir, 'projects'));

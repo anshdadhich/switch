@@ -8,6 +8,7 @@ import {
   forkClaudeCliConversation,
   listClaudeCliConversations,
   type ProcessInfo,
+  withClaudeConfigDir,
 } from './cli-conversations';
 
 const roots: string[] = [];
@@ -184,7 +185,7 @@ it('copies a closed conversation under a new id, titled so Claude Code’s own l
     }
   );
   await expect(
-    forkClaudeCliConversation('/work', 'newer', { CLAUDE_CONFIG_DIR: dir }, run)
+    forkClaudeCliConversation('/work', 'newer', false, { CLAUDE_CONFIG_DIR: dir }, run)
   ).resolves.toEqual({ nativeSessionId: 'copy' });
   expect(run.forkSession).toHaveBeenCalledWith('newer', {
     dir: '/work',
@@ -197,7 +198,7 @@ it('refuses to copy a conversation that is open in Claude Code', async () => {
   const dir = await configDir({ '41.json': holding('newer') });
   const run = deps({ 41: CLAUDE });
   await expect(
-    forkClaudeCliConversation('/work', 'newer', { CLAUDE_CONFIG_DIR: dir }, run)
+    forkClaudeCliConversation('/work', 'newer', false, { CLAUDE_CONFIG_DIR: dir }, run)
   ).rejects.toThrow('This conversation is open in Claude Code (process 41)');
   expect(run.forkSession).not.toHaveBeenCalled();
 });
@@ -206,7 +207,70 @@ it('refuses a conversation that is not one of the folder’s own', async () => {
   const dir = await configDir({});
   const run = deps();
   await expect(
-    forkClaudeCliConversation('/work', 'elsewhere', { CLAUDE_CONFIG_DIR: dir }, run)
+    forkClaudeCliConversation('/work', 'elsewhere', false, { CLAUDE_CONFIG_DIR: dir }, run)
   ).rejects.toThrow('Claude Code has no conversation elsewhere in /work to continue.');
   expect(run.forkSession).not.toHaveBeenCalled();
+});
+
+it('leaves out the copies Switch made, a copy no session owns included', async () => {
+  const dir = await configDir({});
+  const list = await listClaudeCliConversations(
+    '/work',
+    { CLAUDE_CONFIG_DIR: dir },
+    deps(
+      {},
+      {
+        listSessions: vi.fn(async () => [
+          ...structuredClone(SESSIONS),
+          {
+            sessionId: 'copy',
+            summary: 'Build fix (continued in Switch Console)',
+            lastModified: 3_000,
+          },
+        ]),
+      }
+    )
+  );
+  expect(list.conversations.map((c) => c.nativeSessionId)).toEqual(['newer', 'older']);
+});
+
+it('copies only on the person’s word where Claude Code cannot say what is open', async () => {
+  const dir = await configDir(null);
+  const run = deps();
+  await expect(
+    forkClaudeCliConversation('/work', 'newer', false, { CLAUDE_CONFIG_DIR: dir }, run)
+  ).rejects.toThrow('confirm it is closed');
+  expect(run.forkSession).not.toHaveBeenCalled();
+  await expect(
+    forkClaudeCliConversation('/work', 'newer', true, { CLAUDE_CONFIG_DIR: dir }, run)
+  ).resolves.toEqual({ nativeSessionId: 'copy' });
+});
+
+it('refuses a copy unconfirmed when a live Claude Code process’s record cannot be read', async () => {
+  const dir = await configDir({ '41.json': '{"sessionId": "new' });
+  const run = deps({ 41: CLAUDE });
+  await expect(
+    forkClaudeCliConversation('/work', 'newer', false, { CLAUDE_CONFIG_DIR: dir }, run)
+  ).rejects.toThrow('confirm it is closed');
+  expect(run.forkSession).not.toHaveBeenCalled();
+});
+
+it('takes turns with the process-wide config directory, so overlapping reads each see their own', async () => {
+  const before = process.env.CLAUDE_CONFIG_DIR;
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const seen: (string | undefined)[] = [];
+  const first = withClaudeConfigDir({ CLAUDE_CONFIG_DIR: '/a' }, async () => {
+    await held;
+    seen.push(process.env.CLAUDE_CONFIG_DIR);
+  });
+  const second = withClaudeConfigDir({ CLAUDE_CONFIG_DIR: '/b' }, async () => {
+    seen.push(process.env.CLAUDE_CONFIG_DIR);
+  });
+  release();
+  await Promise.all([first, second]);
+  expect(seen).toEqual(['/a', '/b']);
+  expect(process.env.CLAUDE_CONFIG_DIR).toBe(before);
 });

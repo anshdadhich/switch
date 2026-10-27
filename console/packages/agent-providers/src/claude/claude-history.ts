@@ -15,6 +15,27 @@ const INTERRUPTED = /^\[Request interrupted by user[^\]]*\]$/;
  */
 const COMPACTION_SUMMARY = /^This session is being continued from a previous conversation/;
 const OPENING_TAG = /^<([a-z][\w-]*)(?:\s[^>]*)?>/;
+/**
+ * The tags Claude Code wraps around what it adds to a conversation on its own.
+ * Only these are left out: a person who pastes `<div>…</div>` as a prompt
+ * still sees it.
+ */
+const ADDED_CONTEXT_TAGS = new Set([
+  'bash-stderr',
+  'bash-stdout',
+  'command-args',
+  'command-message',
+  'command-name',
+  'ide_diagnostics',
+  'ide_opened_file',
+  'ide_selection',
+  'local-command-caveat',
+  'local-command-stderr',
+  'local-command-stdout',
+  'system-reminder',
+  'task-notification',
+  'user-prompt-submit-hook',
+]);
 
 /**
  * A Claude Code conversation as transcript turns: each prompt someone typed
@@ -30,7 +51,7 @@ export function historyFromClaudeMessages(messages: SessionMessage[]): Conversat
   let turn: ConversationHistoryTurn | null = null;
   const add = (uuid: string, item: ConversationHistoryItem) => {
     if (!turn) {
-      turn = { turnId: `cli:${uuid}`, items: [] };
+      turn = { turnId: uuid, items: [] };
       turns.push(turn);
     }
     turn.items.push(item);
@@ -54,10 +75,10 @@ export function historyFromClaudeMessages(messages: SessionMessage[]): Conversat
         block.type === 'text' && typeof block.text === 'string' ? [block.text.trim()] : []
       );
       if (texts.some((text) => COMPACTION_SUMMARY.test(text))) {
-        turn = { turnId: `cli:${message.uuid}`, items: [] };
+        turn = { turnId: message.uuid, items: [] };
         turns.push(turn);
         add(message.uuid, {
-          itemId: `cli:${message.uuid}`,
+          itemId: message.uuid,
           kind: 'tool-activity',
           status: 'completed',
           title: 'Conversation compacted: the turns before this were summarized',
@@ -76,10 +97,10 @@ export function historyFromClaudeMessages(messages: SessionMessage[]): Conversat
         .filter(Boolean)
         .join('\n\n');
       if (!prompt) continue;
-      turn = { turnId: `cli:${message.uuid}`, items: [] };
+      turn = { turnId: message.uuid, items: [] };
       turns.push(turn);
       add(message.uuid, {
-        itemId: `cli:${message.uuid}`,
+        itemId: message.uuid,
         kind: 'user-message',
         status: 'completed',
         title: '',
@@ -87,7 +108,7 @@ export function historyFromClaudeMessages(messages: SessionMessage[]): Conversat
       });
     } else if (message.type === 'assistant') {
       blocks.forEach((block, index) => {
-        const itemId = `cli:${message.uuid}:${index}`;
+        const itemId = `${message.uuid}:${index}`;
         if (block.type === 'text' && typeof block.text === 'string' && block.text.trim())
           add(message.uuid, {
             itemId,
@@ -127,23 +148,23 @@ function promptText(text: string): string {
   }
   const shell = BASH_INPUT.exec(trimmed);
   if (shell) return `! ${shell[1]!.trim()}`;
-  if (INTERRUPTED.test(trimmed) || onlyTagBlocks(trimmed)) return '';
+  if (INTERRUPTED.test(trimmed) || onlyAddedContext(trimmed)) return '';
   return trimmed;
 }
 
 /**
- * Whether a text is tag-wrapped blocks and nothing else, such as
+ * Whether a text is blocks of Claude Code's own tags and nothing else, such as
  * `<task-notification>…</task-notification>` or a command's
  * `<bash-stdout>…</bash-stdout><bash-stderr>…</bash-stderr>`: context Claude
  * Code added to the conversation, not something a person typed. Walked rather
  * than matched with one pattern, which would backtrack on a long paste.
  */
-function onlyTagBlocks(text: string): boolean {
+function onlyAddedContext(text: string): boolean {
   let rest = text;
   if (!rest) return false;
   while (rest) {
     const open = OPENING_TAG.exec(rest);
-    if (!open) return false;
+    if (!open || !ADDED_CONTEXT_TAGS.has(open[1]!)) return false;
     const closing = `</${open[1]}>`;
     const end = rest.indexOf(closing, open[0].length);
     if (end < 0) return false;

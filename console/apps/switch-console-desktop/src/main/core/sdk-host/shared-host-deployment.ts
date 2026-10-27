@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, posix } from 'node:path';
@@ -46,12 +46,25 @@ export async function locateSharedHost(
 ): Promise<{ ctx: IExecutionContext; entrypoint: string } | null> {
   const bundle = resolveSharedHostBundlePath();
   if (transport.kind !== 'ssh') return { ctx: new LocalExecutionContext(), entrypoint: bundle };
+  return locateBundle(transport, dir, await bundleName());
+}
+
+/** This build's bundle's file name on a host: named after its SHA-256. */
+async function bundleName(): Promise<string> {
   const hash = createHash('sha256')
-    .update(await readFile(bundle))
+    .update(await readFile(resolveSharedHostBundlePath()))
     .digest('hex');
+  return `shared-host-${hash}.mjs`;
+}
+
+async function locateBundle(
+  transport: Extract<LocationTransport, { kind: 'ssh' }>,
+  dir: string,
+  name: string
+): Promise<{ ctx: IExecutionContext; entrypoint: string } | null> {
   const proxy = await ensureSshConnected(transport.connectionId, transport.host);
   const ctx = new SshExecutionContext(proxy, { root: dir });
-  const { stdout } = await ctx.exec('node', ['-e', LOCATE_BUNDLE, `shared-host-${hash}.mjs`]);
+  const { stdout } = await ctx.exec('node', ['-e', LOCATE_BUNDLE, name]);
   const entrypoint = stdout.trim();
   if (entrypoint) return { ctx, entrypoint };
   ctx.dispose();
@@ -59,11 +72,27 @@ export async function locateSharedHost(
 }
 
 /**
+ * Makes a private directory (mkdtemp makes it 0700) to stage one request in,
+ * under the staging directory, and prints its path. Argument: the staging
+ * directory.
+ */
+const MAKE_REQUEST_DIR = String.raw`
+const fs = require('node:fs'), path = require('node:path');
+const [staging] = process.argv.slice(1);
+fs.mkdirSync(staging, { recursive: true, mode: 0o700 });
+console.log(fs.mkdtempSync(path.join(staging, 'launch-')));
+`;
+
+/** How much a one-off command may print here before Node stops reading it. */
+const REQUEST_MAX_BUFFER = 64 * 1024 * 1024;
+
+/**
  * Answers a request with one of this build's shared host's one-off commands.
- * The request is staged as a file only the user can read, beside a launch's
- * configuration, and removed afterwards, since it can carry a shell setup a
- * command line would show to `ps`. Here it runs on Console's own runtime, as
- * local sessions do; on an SSH host it runs on the host's `node`.
+ * The request is staged as a file only the user can read, in a private
+ * directory beside a launch's configuration, and removed afterwards, since it
+ * can carry a shell setup a command line would show to `ps`. Here it runs on
+ * Console's own runtime, as local sessions do; on an SSH host it runs on the
+ * host's `node`.
  *
  * `deploy` uploads this build's bundle to an SSH host first when it is not
  * there, which only a launch may do. Without it the command runs only where
@@ -85,6 +114,7 @@ export async function runHostRequest(
       return await ctx.exec(process.execPath, [resolveSharedHostBundlePath(), mode, path], {
         env: { ELECTRON_RUN_AS_NODE: '1' },
         timeout: options.timeout,
+        maxBuffer: REQUEST_MAX_BUFFER,
       });
     } finally {
       ctx.dispose();
@@ -99,43 +129,49 @@ export async function runHostRequest(
       `${transport.host} does not have this version of Switch Console's host yet. Start a session for an agent there, or press Update on its Room watcher, then try again.`
     );
   const proxy = await ensureSshConnected(transport.connectionId, transport.host);
-  const name = `launch-${randomUUID()}`;
-  const local = await mkdtemp(join(tmpdir(), 'switch-sdk-request-'));
-  const fs = new SshFileSystem(proxy, bundle.staging);
   const ctx = new SshExecutionContext(proxy, { root: transport.dir });
+  let staged: string | null = null;
   try {
+    staged = (await ctx.exec('node', ['-e', MAKE_REQUEST_DIR, bundle.staging])).stdout.trim();
+    const local = await mkdtemp(join(tmpdir(), 'switch-sdk-request-'));
+    const fs = new SshFileSystem(proxy, staged);
     try {
       await writeFile(join(local, 'request.json'), JSON.stringify(request), { mode: 0o600 });
-      await fs.mkdir(name);
-      await fs.copyLocalFile(join(local, 'request.json'), `${name}/request.json`);
+      await fs.copyLocalFile(join(local, 'request.json'), 'request.json');
     } finally {
       fs.close();
       await rm(local, { recursive: true, force: true });
     }
-    return await ctx.exec(
-      'node',
-      [bundle.entrypoint, mode, `${bundle.staging}/${name}/request.json`],
-      { timeout: options.timeout }
-    );
+    const path = `${staged}/request.json`;
+    await ctx.exec('node', ['-e', "require('node:fs').chmodSync(process.argv[1],0o600)", path]);
+    return await ctx.exec('node', [bundle.entrypoint, mode, path], { timeout: options.timeout });
   } catch (error) {
-    // A bundle that has gone is one reason a launch fails; the next checks again.
-    if (options.deploy) forgetHostBundle(transport.connectionId);
+    // A bundle that has gone is one reason a launch fails; the next checks
+    // again. A command that ran and refused says nothing about the bundle.
+    const stderr = (error as { stderr?: unknown }).stderr;
+    if (
+      options.deploy &&
+      typeof stderr === 'string' &&
+      stderr.includes(posix.basename(bundle.entrypoint))
+    )
+      forgetHostBundle(transport.connectionId);
     throw error;
   } finally {
     // Not allowed to hide why the command failed. What is left is swept with
     // abandoned launches (`HOST_PREPARE`).
-    await ctx
-      .exec('node', [
-        '-e',
-        "require('node:fs').rmSync(process.argv[1],{recursive:true,force:true})",
-        `${bundle.staging}/${name}`,
-      ])
-      .catch((error: unknown) =>
-        log.warn('Could not remove a staged host request', {
-          host: transport.host,
-          error: String(error),
-        })
-      );
+    if (staged)
+      await ctx
+        .exec('node', [
+          '-e',
+          "require('node:fs').rmSync(process.argv[1],{recursive:true,force:true})",
+          staged,
+        ])
+        .catch((error: unknown) =>
+          log.warn('Could not remove a staged host request', {
+            host: transport.host,
+            error: String(error),
+          })
+        );
     ctx.dispose();
   }
 }
@@ -148,13 +184,11 @@ export async function runHostRequest(
 async function thisBuildsBundle(
   transport: Extract<LocationTransport, { kind: 'ssh' }>
 ): Promise<HostBundle | null> {
-  const hash = createHash('sha256')
-    .update(await readFile(resolveSharedHostBundlePath()))
-    .digest('hex');
-  const located = await locateSharedHost(transport, transport.dir);
+  const name = await bundleName();
+  const located = await locateBundle(transport, transport.dir, name);
   if (!located) return null;
   located.ctx.dispose();
-  if (posix.basename(located.entrypoint) !== `shared-host-${hash}.mjs`) return null;
+  if (posix.basename(located.entrypoint) !== name) return null;
   return {
     entrypoint: located.entrypoint,
     staging: posix.join(posix.dirname(posix.dirname(located.entrypoint)), 'sdk-launch'),
