@@ -183,6 +183,12 @@ right.
   An Org Admin's admin rights over a workspace come from the organization,
   so the workspace members page refuses to demote or remove an Org Admin and
   points to the organization's members instead.
+- The workspace members page lists every Org Admin, those with no membership
+  row there marked "via the organization".
+- Removing someone from an organization is refused while they still belong
+  to any of its workspaces, naming them: leaving a workspace revokes their
+  keys and connections there and refuses while they own agents, which is the
+  workspace's own removal to do.
 - The last Org Admin of an organization cannot be demoted or removed: 409,
   as the last Workspace Admin is refused today. Account deletion refuses the
   last Org Admin of an organization with other members.
@@ -204,18 +210,24 @@ platform_access = is_operator and not administers_workspace
   as its admin. Whenever that access comes from the operator flag alone, it
   is recorded in the workspace's `audit_events` as `platform_access`, with the
   operator, the route and the time: once when the operator enters the
-  workspace in a session, and for every write. Workspace and Org Admins read
-  it in the audit log they already have. Access the operator holds through an
-  ordinary role (their own organization on a self-hosted server) is not
-  marked.
+  workspace, and for every write. Entering is `POST /tenants/{id}/switch`;
+  signing in never selects a workspace the operator reaches only by the flag,
+  so every visit starts with a recorded switch. A write is any request other
+  than `GET`, `HEAD` and `OPTIONS`, recorded before the route runs, so an
+  attempt that fails is recorded too. Workspace and Org Admins read it in the
+  audit log they already have. Access the operator holds through an ordinary
+  role (their own organization on a self-hosted server) is not marked.
+- **Finding a workspace.** `GET /operator/workspaces` lists every workspace;
+  `GET /tenants` stays the operator's own, so the ordinary picker never
+  lists customers'. Listing records nothing; entering does.
 - **Restoring an admin.** An organization with no Org Admin left gets one
   from the operator, recorded the same way.
 - The operator never appears in a members list, and holds no membership row
   it did not get by invitation.
 
-`Principal` grows a `platform_access` bit beside `is_admin`, set by the same
-dependency, so the audit write sits in one place and a route cannot grant
-operator access without recording it.
+The dependency that binds every gateway request (`get_current_user`) decides
+`platform_access` and writes the record, so it sits in one place and no
+route can grant operator access without it.
 
 ## Creating organizations and workspaces
 
