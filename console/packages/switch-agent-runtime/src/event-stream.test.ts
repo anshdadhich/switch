@@ -530,6 +530,21 @@ describe('a busy server', () => {
     abort.abort();
   });
 
+  it('stops at once when stopped while waiting its turn', async () => {
+    vi.useFakeTimers();
+    serve((socket) => {
+      socket.refuse(503, { code: 'busy', message: 'opening at capacity', retry_after_s: 300 });
+    });
+    const { abort } = makeStream({ rooms: [] });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(server.sockets).toHaveLength(1);
+
+    abort.abort();
+    await vi.advanceTimersByTimeAsync(0);
+    // Nothing is left waiting out the 300 s, to keep the process alive.
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it('waits its turn even right after a restart', async () => {
     vi.useFakeTimers();
     serve((socket, index) => {

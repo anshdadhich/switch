@@ -218,17 +218,20 @@ async def test_a_caller_refused_again_before_its_time_keeps_its_time() -> None:
     assert gate._retry_after("next", clock.now) == pytest.approx(first)
 
 
-async def test_the_line_goes_no_further_than_the_callers_it_remembers(
+async def test_callers_past_the_end_of_the_line_are_spread_within_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(open_gate, "MAX_TRACKED", 3)
+    monkeypatch.setattr(open_gate, "MAX_TRACKED", 4)
     clock = _Clock()
-    gate = OpenGate(_Held(), limit=1, clock=clock, rand=lambda: 0.0)
+    draws = iter([0.0, 0.0, 0.0, 0.25, 0.75])
+    gate = OpenGate(_Held(), limit=1, clock=clock, rand=lambda: next(draws))
     gate._open_s.append(1.0)
     times = [gate._retry_after(f"caller-{n}", clock.now) for n in range(5)]
-    # Three callers' worth of one-second slots, and no further.
-    assert times == pytest.approx([1.0, 2.0, 3.0, 3.0, 3.0])
-    assert len(gate._given) == 3
+    # Four callers' worth of one-second slots, and past that a random point
+    # within them, not all of them at the end.
+    assert times[:3] == pytest.approx([1.0, 2.0, 3.0])
+    assert times[3:] == pytest.approx([1.75, 3.25])
+    assert len(gate._given) == 4
 
 
 async def test_an_open_that_goes_away_while_waiting_leaves_no_slot_taken() -> None:

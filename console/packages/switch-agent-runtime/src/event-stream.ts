@@ -191,6 +191,17 @@ export function busyRetryAfterMs(status: number, body: string): number | null {
   }
 }
 
+/** Waits `ms`, or less if any of these signals aborts first, and leaves no timer behind. */
+function waitUnless(ms: number, ...signals: AbortSignal[]): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([
+    new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, ms);
+    }),
+    until(...signals),
+  ]).finally(() => clearTimeout(timer));
+}
+
 /** Resolves when any of these signals aborts, so a wait can be given up on. */
 export function until(...signals: AbortSignal[]): Promise<void> {
   const any = AbortSignal.any(signals);
@@ -939,7 +950,7 @@ export class SwitchEventStream {
         });
       }
       this.deps.onDisconnected?.({ error });
-      if (toldMs !== null) await new Promise((r) => setTimeout(r, toldMs));
+      if (toldMs !== null) await waitUnless(toldMs, signal, this.halt.signal);
       else await pace();
     }
   }

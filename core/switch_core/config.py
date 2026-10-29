@@ -760,7 +760,7 @@ class SwitchConfig(BaseSettings):
     # with 300 agents on two pods and 30 + 10 pools, no pool timeouts and no
     # agent lost, against 161 pool timeouts and 56 agents lost without the
     # gate (dev-abel, 28 Oct 2026). 0 turns it off.
-    agent_open_limit: int = 8
+    agent_open_limit: int = Field(default=8, ge=0)
 
     # Resolving a bearer token to its agent is the highest-frequency query in
     # the system — it runs before every authenticated request, and a fleet of

@@ -225,17 +225,26 @@ class OpenGate:
 
         The line moves one slot every open time over `limit`. The first caller
         told to come back is behind the opens waiting here, each one after it a
-        slot later, at a random point within its slot. A caller already given a
-        time that has not come keeps it."""
+        slot later, at a random point within its slot. The line reaches no
+        further than `MAX_TRACKED` callers' worth of slots; past that, a caller
+        is given a random point within it. A caller already given a time that
+        has not come keeps it."""
         if caller is not None:
             at = self._given.get(caller)
             if at is not None and at > now:
                 self._given.move_to_end(caller)
                 return at - now
         spacing = self._open_time() / self._slots
+        end = now + MAX_TRACKED * spacing
         start = max(now + (len(self._waiting) + 1) * spacing, self._next_at)
-        self._next_at = start + spacing
-        at = min(start + spacing * self._rand(), now + MAX_TRACKED * spacing)
+        if start < end:
+            self._next_at = start + spacing
+            at = start + spacing * self._rand()
+        else:
+            # Past the end of the line: a random point within it, so callers
+            # refused together do not come back together.
+            self._next_at = end
+            at = now + spacing + (end - now - spacing) * self._rand()
         if caller is not None:
             self._given[caller] = at
             self._given.move_to_end(caller)
