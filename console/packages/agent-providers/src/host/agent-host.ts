@@ -645,6 +645,15 @@ export class AgentHostAssignments {
 export type AgentEventStream = {
   /** The agent host, not Switch, tells a room when it starts a session for it. */
   readonly announcesSessionStarts: boolean;
+  /**
+   * The room of a session's tool call is the one this stream was last told
+   * the session is placed in, not one Switch recorded when the session called
+   * `connect_to_room`. True for an agent controller, whose relay names the
+   * room on every call from these placements, so a placement it did not take
+   * leaves the session calling from no room. False for the agent's own
+   * connection, where Switch places the session itself.
+   */
+  readonly placementsNameCallRooms: boolean;
   start(): void;
   setSpawnCapable(capable: boolean): void;
   /** `shares`: session id → the rooms it answers from its home room. */
@@ -842,6 +851,7 @@ export async function runAgentHost(
           connectionId,
           placements,
           publish,
+          placementsNameCallRooms: () => stream?.placementsNameCallRooms === true,
           redactions: links.redactions,
         })
       )

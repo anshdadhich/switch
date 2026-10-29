@@ -76,6 +76,8 @@ export function openHubStream(url: string): OpenAgentStream {
 class HubEventStream implements AgentEventStream {
   /** The agent host, not Switch, tells a room when it starts a session for it. */
   readonly announcesSessionStarts = true;
+  /** The controller's relay names each call's room from the placements. */
+  readonly placementsNameCallRooms = true;
   private started = false;
   private socket: WebSocket | null = null;
   /** The last sequence this side has handled; sent on every hello. */
@@ -103,11 +105,19 @@ class HubEventStream implements AgentEventStream {
   // Switch decides who may start a session from the agent's binding.
   setSpawnCapable(): void {}
 
+  /**
+   * States the placements to the hub. Refused while the hub is not connected
+   * or closes before answering: the next hello carries them, but until then
+   * the relay names no room for the sessions they move, so a caller waiting
+   * on them must not take them as stated.
+   */
   async replacePlacements(placements: Record<string, string>): Promise<void> {
     this.placements = { ...placements };
     const socket = this.socket;
-    // Not connected: the next hello carries them.
-    if (!socket || socket.readyState !== WebSocket.OPEN) return;
+    if (!socket || socket.readyState !== WebSocket.OPEN)
+      throw new Error(
+        'the agent controller hub is not connected; the placements are stated when it reconnects'
+      );
     const id = ++this.nextId;
     const error = await new Promise<string | undefined>((resolve) => {
       this.calls.set(id, resolve);
@@ -191,7 +201,10 @@ class HubEventStream implements AgentEventStream {
         this.deps.signal.removeEventListener('abort', abort);
         if (this.socket === socket) this.socket = null;
         // The placements a call was sending go again with the next hello.
-        for (const call of this.calls.values()) call(undefined);
+        for (const call of this.calls.values())
+          call(
+            'the agent controller hub closed before it took the placements; they are stated again when it reconnects'
+          );
         this.calls.clear();
         resolve({ code: event.code, reason: event.reason, helloed });
       });

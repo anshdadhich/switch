@@ -394,6 +394,8 @@ export class AgentHub {
     return {
       // Switch keeps no record of an agent's sessions: the agent host says when it starts one.
       announcesSessionStarts: true,
+      // The relay names each call's room from these placements (`roomFor`).
+      placementsNameCallRooms: true,
       start: () => {
         if (host.started || host.closed) return;
         host.started = true;
@@ -422,12 +424,16 @@ export class AgentHub {
       // Switch decides who may start a session from the agent's binding, not
       // from what an agent host on this machine declares.
       setSpawnCapable: () => {},
+      // Membership is not checked here: Switch checks it on every call the
+      // relay names a room for, against the agent's memberships as they are
+      // now, where `agent.rooms` may not yet have heard of a room the agent
+      // was just added to.
       replacePlacements: async (placements) => {
-        if (host.closed || agent.host !== host) return;
+        if (host.closed || agent.host !== host)
+          throw new Error(
+            `this agent host no longer holds agent ${agentId}'s stream on the agent controller; a newer one does`
+          );
         const rooms = Object.values(placements);
-        for (const roomId of new Set(rooms))
-          if (agent.rooms && !agent.rooms.has(roomId))
-            throw new Error(`agent ${agentId} is not a member of room ${roomId}`);
         const twice = [...new Set(rooms.filter((room, index) => rooms.indexOf(room) !== index))];
         if (twice.length)
           throw new Error(

@@ -274,14 +274,36 @@ describe('placements', () => {
     expect(hub.roomFor(AGENT, 'session-1')).toBeNull();
   });
 
-  it('refuses a room the agent is not in, and one room for two sessions', async () => {
+  it('takes a room the agent was added to after its rooms were last sent', async () => {
+    // Switch checks membership on each call the relay names the room for. A
+    // refusal here, on a copy that has not heard of the room yet, left a
+    // session whose connect_to_room had succeeded calling from no room.
     hub.streamAttached();
     hub.attach(AGENT, 0, ['room-a']);
     const { stream } = watcher();
     stream.start();
-    await expect(stream.replacePlacements({ 'session-1': 'room-z' })).rejects.toThrow(
-      /not a member of room room-z/
+    await stream.replacePlacements({ 'session-1': 'room-new' });
+    expect(hub.roomFor(AGENT, 'session-1')).toBe('room-new');
+  });
+
+  it('refuses placements from an agent host a newer one replaced, rather than dropping them', async () => {
+    hub.streamAttached();
+    hub.attach(AGENT, 0, ['room-a']);
+    const older = watcher();
+    older.stream.start();
+    const newer = watcher();
+    newer.stream.start();
+    await expect(older.stream.replacePlacements({ 'session-1': 'room-a' })).rejects.toThrow(
+      /a newer one does/
     );
+    expect(hub.roomFor(AGENT, 'session-1')).toBeNull();
+  });
+
+  it('refuses one room for two sessions', async () => {
+    hub.streamAttached();
+    hub.attach(AGENT, 0, ['room-a']);
+    const { stream } = watcher();
+    stream.start();
     await expect(
       stream.replacePlacements({ 'session-1': 'room-a', 'session-2': 'room-a' })
     ).rejects.toThrow(/more than one session/);
