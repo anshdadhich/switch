@@ -7,6 +7,8 @@ import { promisify } from 'node:util';
 import {
   forkSession as sdkForkSession,
   listSessions as sdkListSessions,
+  type SessionStore,
+  type SessionStoreEntry,
 } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 
@@ -158,6 +160,52 @@ export async function forkClaudeCliConversation(
   });
 }
 
+/**
+ * The saved conversations under one Claude Code config directory, as the SDK's
+ * readers take a store: for reading a conversation from the directory a
+ * session uses without changing this process's environment, which a host
+ * running other work cannot afford. Read only; a conversation is found by its
+ * id under any project, as Claude Code's own resume finds it.
+ */
+export function configDirSessionStore(configDir: string): SessionStore {
+  return {
+    append: async () => {
+      throw new Error('This store only reads saved conversations.');
+    },
+    load: async ({ sessionId, subpath }) => {
+      if (subpath !== undefined) return null;
+      const projects = join(configDir, 'projects');
+      let names: string[];
+      try {
+        names = await readdir(projects);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+        throw error;
+      }
+      for (const name of names) {
+        let text: string;
+        try {
+          text = await readFile(join(projects, name, `${sessionId}.jsonl`), 'utf8');
+        } catch (error) {
+          const code = (error as NodeJS.ErrnoException).code;
+          if (code === 'ENOENT' || code === 'ENOTDIR') continue;
+          throw error;
+        }
+        // A line cut short by a write in progress is the only one left out.
+        return text.split('\n').flatMap((line): SessionStoreEntry[] => {
+          if (!line.trim()) return [];
+          try {
+            return [JSON.parse(line) as SessionStoreEntry];
+          } catch {
+            return [];
+          }
+        });
+      }
+      return null;
+    },
+  };
+}
+
 /** Where Claude Code keeps its conversations for a process with this environment. */
 export function claudeConfigDir(env: Record<string, string | undefined>): string {
   return env.CLAUDE_CONFIG_DIR || join(env.HOME || homedir(), '.claude');
@@ -168,12 +216,12 @@ let configDirTurn: Promise<unknown> = Promise.resolve();
 
 /**
  * Runs `work` with this process's `CLAUDE_CONFIG_DIR` naming the directory
- * `env` gives Claude Code. The SDK's readers of saved conversations take the
- * directory from this process's environment, with no option to name another,
- * and remember it per value of the variable, so setting it is enough. Calls
- * take turns, since the variable is the whole process's: overlapping ones
- * would each read with the other's directory and restore the wrong value. Not
- * to be nested: an inner call would wait for the outer one for ever.
+ * `env` gives Claude Code. Listing and copying use the SDK's own file access,
+ * which takes the directory from this process's environment and remembers it
+ * per value of the variable, so setting it is enough. For the host's one-off
+ * commands, each its own short-lived process; a long-lived host reads through
+ * {@link configDirSessionStore} instead. Calls take turns all the same, and
+ * are not to be nested: an inner call would wait for the outer one for ever.
  */
 export function withClaudeConfigDir<T>(
   env: Record<string, string | undefined>,
@@ -302,7 +350,12 @@ async function processes(pids: number[]): Promise<Map<number, ProcessInfo> | nul
     ));
   } catch (error) {
     const output = (error as { stdout?: unknown }).stdout;
-    if ((error as { code?: unknown }).code !== 1 || typeof output !== 'string') return null;
+    if ((error as { code?: unknown }).code !== 1 || typeof output !== 'string') {
+      console.warn(
+        `Could not ask ps about Claude Code's processes, so each live one is taken to hold its conversation: ${String(error)}`
+      );
+      return null;
+    }
     stdout = output;
   }
   const described = new Map<number, ProcessInfo>();

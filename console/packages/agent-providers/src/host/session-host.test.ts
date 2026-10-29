@@ -803,6 +803,38 @@ it('finishes an import a crash cut short without republishing what it had publis
   expect(restarted.snapshot().notices.map((notice) => notice.code)).toContain('HISTORY_IMPORTED');
 });
 
+it('publishes the prompt and later parts a crash kept from being recorded, though their turn and first part were', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'sdk-history-test-'));
+  roots.push(root);
+  const fixture = continuing('claude', async () => structuredClone(CLI_TURNS));
+  const host = await startHost(root, fixture.config, fixture.adapter);
+  hosts.push(host);
+  await until(() => expect(host.snapshot().session.status).toBe('ready'));
+  await host.shutdown();
+  hosts.splice(hosts.indexOf(host), 1);
+  // The turn shares its id with its prompt, and the reply's first part is in;
+  // the prompt itself, the reply's second part and the settling notice are not.
+  const journal = join(root, 'events.jsonl');
+  const lines = (await readFile(journal, 'utf8')).split('\n').filter(Boolean);
+  const settled = lines.findIndex((line) => line.includes('HISTORY_IMPORTED'));
+  const kept = lines
+    .slice(0, settled)
+    .filter(
+      (line) => !line.includes('"itemId":"imported:cli:prompt-1"') && !line.includes(':part:1"')
+    );
+  await writeFile(journal, `${kept.join('\n')}\n`);
+  const next = continuing('claude', async () => structuredClone(CLI_TURNS));
+  const restarted = await startHost(root, next.config, next.adapter);
+  hosts.push(restarted);
+  await until(() => expect(restarted.snapshot().session.status).toBe('ready'));
+  expect(restarted.snapshot().items.map((item) => item.itemId)).toEqual(
+    expect.arrayContaining(['imported:cli:prompt-1', 'imported:cli:answer-1:1:part:1'])
+  );
+  expect(
+    restarted.snapshot().items.filter((item) => item.turnId.startsWith('imported:'))
+  ).toHaveLength(4);
+});
+
 it('keeps the most recent whole turns of a long conversation', () => {
   const turn = (id: string, count: number): ConversationHistoryTurn => ({
     turnId: id,

@@ -6,6 +6,24 @@ type TurnContext = { commandId: string | null; origin: Origin | null };
 
 /** As much text as one published item carries; longer text goes in `:part:` items after it. */
 export const ITEM_PART_CHARACTERS = 4096;
+
+/**
+ * `item` with `text`, as the items it is published as: the first under the
+ * item's own id, and each further {@link ITEM_PART_CHARACTERS} of text under
+ * `<id>:part:<n>`. At least `minimum` of them, so an item whose text has grown
+ * shorter still updates every part it was published in before.
+ */
+export function itemParts(item: Item, text: string, minimum: number): Item[] {
+  const characters = Array.from(text);
+  const count = Math.max(1, Math.ceil(characters.length / ITEM_PART_CHARACTERS), minimum);
+  return Array.from({ length: count }, (_, index) => ({
+    ...structuredClone(item),
+    itemId: index === 0 ? item.itemId : `${item.itemId}:part:${index}`,
+    text: characters
+      .slice(index * ITEM_PART_CHARACTERS, (index + 1) * ITEM_PART_CHARACTERS)
+      .join(''),
+  }));
+}
 type BufferedItem = { item: Item; emittedAt: number; dirty: boolean; parts: number };
 
 /** Projects chat and tool summaries only. The host owns sequencing and durable publication. */
@@ -126,19 +144,9 @@ export class ChatProjector {
     buffer.item.revision += 1;
     buffer.emittedAt = now;
     buffer.dirty = false;
-    const characters = Array.from(this.visible(buffer.item.text, final));
-    const count = Math.max(1, Math.ceil(characters.length / ITEM_PART_CHARACTERS), buffer.parts);
-    buffer.parts = count;
-    return Array.from({ length: count }, (_, index) => ({
-      type: 'item.upsert' as const,
-      item: {
-        ...structuredClone(buffer.item),
-        itemId: index === 0 ? buffer.item.itemId : `${buffer.item.itemId}:part:${index}`,
-        text: characters
-          .slice(index * ITEM_PART_CHARACTERS, (index + 1) * ITEM_PART_CHARACTERS)
-          .join(''),
-      },
-    }));
+    const parts = itemParts(buffer.item, this.visible(buffer.item.text, final), buffer.parts);
+    buffer.parts = parts.length;
+    return parts.map((item) => ({ type: 'item.upsert' as const, item }));
   }
 
   private visible(text: string, final: boolean): string {

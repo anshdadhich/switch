@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { commandSchema, isImportedTurn } from '@switch-console/shared/session-v1';
+import { commandSchema, hasOwnActivity } from '@switch-console/shared/session-v1';
 import type { Command, CommandStatus, Session, Snapshot } from '@switch-console/shared/session-v1';
 import { z } from 'zod';
 import type { ProviderAdapter, ProviderSessionStartInput } from '../adapter';
@@ -639,7 +639,7 @@ export async function runSharedHost(
     // room message: its provider would otherwise keep the old ones.
     // Turns copied in from a conversation started outside Switch are not this
     // conversation having started here: it resumes under Switch's context.
-    const startedHere = () => host!.snapshot().turns.some((turn) => !isImportedTurn(turn.turnId));
+    const startedHere = () => hasOwnActivity(host!.snapshot());
     const instructions = options.instructions;
     let instructionsNote: string | null = null;
     if (instructions !== null) {

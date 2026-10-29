@@ -30,7 +30,7 @@ import type {
 } from '../adapter';
 import type { TokenUsage, TurnOutcome, UserInputAnswers } from '../events';
 import type { ProviderRuntimeEvent } from '../events';
-import { ChatProjector, ITEM_PART_CHARACTERS } from '../session-v1/chat-projector';
+import { ChatProjector, ITEM_PART_CHARACTERS, itemParts } from '../session-v1/chat-projector';
 import { ATTACHMENT_MIME_TYPES } from './attachments';
 import { Journal } from './journal';
 import { fitModelCatalog } from './model-catalog';
@@ -455,49 +455,43 @@ export class HostedSession {
     // published again it could differ (a token scrubbed since), and two
     // versions of one revision are a conflict the transcript refuses.
     const present = this.replica.snapshot();
-    const published = new Set([
-      ...present.turns.map((turn) => turn.turnId),
-      ...present.items.map((item) => item.itemId),
-    ]);
+    const publishedTurns = new Set(present.turns.map((turn) => turn.turnId));
+    const publishedItems = new Set(present.items.map((item) => item.itemId));
     const bodies: HostBody[] = [];
     for (const turn of shown) {
       const turnId = `${IMPORTED_TURN_PREFIX}${turn.turnId}`;
-      if (!published.has(turnId))
+      if (!publishedTurns.has(turnId))
         bodies.push({ type: 'turn.upsert', turnId, status: 'completed', commandId: null });
       for (const item of turn.items) {
-        const itemId = `${IMPORTED_TURN_PREFIX}${item.itemId}`;
-        if (published.has(itemId)) continue;
         // Scrubbed whole before it is cut, as the chat projector does, so no
         // part carries a token in pieces that the scrub of each part would miss.
         const text = this.config.redactions ? this.config.redactions.text(item.text) : item.text;
         const title = this.config.redactions ? this.config.redactions.text(item.title) : item.title;
-        const characters = Array.from(text);
-        const parts = Math.max(1, Math.ceil(characters.length / ITEM_PART_CHARACTERS));
-        for (let index = 0; index < parts; index++)
-          bodies.push({
-            type: 'item.upsert',
-            item: {
-              itemId: index === 0 ? itemId : `${itemId}:part:${index}`,
-              turnId,
-              revision: 1,
-              kind: item.kind,
-              status: item.status,
-              title: Array.from(title).slice(0, ITEM_PART_CHARACTERS).join(''),
-              text: characters
-                .slice(index * ITEM_PART_CHARACTERS, (index + 1) * ITEM_PART_CHARACTERS)
-                .join(''),
-              attachments: [],
-              origin: null,
-            },
-          });
+        const parts = itemParts(
+          {
+            itemId: `${IMPORTED_TURN_PREFIX}${item.itemId}`,
+            turnId,
+            revision: 1,
+            kind: item.kind,
+            status: item.status,
+            title: Array.from(title).slice(0, ITEM_PART_CHARACTERS).join(''),
+            text: '',
+            attachments: [],
+            origin: null,
+          },
+          text,
+          1
+        );
+        for (const part of parts)
+          if (!publishedItems.has(part.itemId)) bodies.push({ type: 'item.upsert', item: part });
       }
     }
     // Batched to spare a flush to disk per event, and bounded in bytes too, so
-    // a crash mid-write leaves a small torn line rather than a large one.
+    // no one write grows much past what a single event could be.
     let batch: HostBody[] = [];
     let batchBytes = 0;
     for (const body of bodies) {
-      const bytes = JSON.stringify(body).length;
+      const bytes = Buffer.byteLength(JSON.stringify(body));
       if (
         batch.length &&
         (batch.length >= HISTORY_BATCH || batchBytes + bytes > HISTORY_BATCH_BYTES)
