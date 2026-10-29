@@ -295,6 +295,7 @@ it('says which room a post reached, and sends it where the agent named', async (
     connectionId: 'connection',
     placements,
     publish: async () => {},
+    placementsNameCallRooms: () => false,
     redactions: new Redactions(),
   });
   calls.connect.mockResolvedValue({ content: [{ type: 'text', text: 'posted' }] });
@@ -344,6 +345,7 @@ it('leaves a shared session at home when it connects to a room it shares', async
     connectionId: 'connection',
     placements,
     publish: async () => {},
+    placementsNameCallRooms: () => false,
     redactions: new Redactions(),
   });
   calls.connect.mockResolvedValue({ content: [{ type: 'text', text: 'connected' }] });
@@ -444,4 +446,37 @@ it('keeps a move Switch recorded itself when the stream does not take the placem
   expect(result.isError).toBeFalsy();
   expect(placements.roomOf('session')).toBe('room');
   expect(warn).toHaveBeenCalledWith(expect.stringMatching(/stated again on the next change/));
+});
+
+it('puts a session’s shared rooms back too when the agent controller does not take its move', async () => {
+  const base = await mkdtemp(join(tmpdir(), 'watcher-tools-'));
+  roots.push(base);
+  const placements = await SessionPlacements.open(base, () => []);
+  await placements.place('lead', 'home');
+  await placements.share('lead', 'work');
+  vi.spyOn(console, 'warn').mockImplementation(() => {});
+  let refuse = true;
+  const answer = sessionToolAnswerer({
+    identity: { agentId: 'agent', endpoint: 'https://switch.test', token: 't' },
+    connectionId: 'connection',
+    placements,
+    publish: async () => {
+      if (refuse) {
+        refuse = false;
+        throw new Error('the agent controller hub is not connected');
+      }
+    },
+    placementsNameCallRooms: () => true,
+    redactions: new Redactions(),
+  });
+  calls.connect.mockResolvedValue({ content: [{ type: 'text', text: 'connected' }] });
+  const result = (await answer(await caller(base, 'lead'), {
+    type: 'tool',
+    name: 'connect_to_room',
+    arguments: { room_id: 'elsewhere' },
+  })) as { isError?: boolean };
+
+  expect(result.isError).toBe(true);
+  expect(placements.roomOf('lead')).toBe('home');
+  expect(placements.sharerOf('work')).toBe('lead');
 });

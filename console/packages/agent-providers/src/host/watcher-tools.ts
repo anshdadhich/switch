@@ -128,7 +128,7 @@ export function sessionToolAnswerer(deps: {
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       if (deps.placementsNameCallRooms()) {
-        await deps.placements.restore(before);
+        await deps.placements.restore(before, beforeShares);
         // So what the stream states on its next change or reconnect is the
         // map put back, not the move it did not take.
         await deps.publish().catch(() => {});
