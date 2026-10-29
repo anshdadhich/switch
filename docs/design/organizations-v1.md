@@ -233,11 +233,22 @@ route can grant operator access without it.
 
 - `POST /gateway/organizations`: any signed-in user, allowed by
   `GATEWAY_SIGNUP_MODE`. The caller becomes Org Admin. The organization
-  starts with one workspace, with the caller its Workspace Admin.
-- `POST /gateway/organizations/current/workspaces`: Org Admin only.
+  starts with one workspace, with the caller its Workspace Admin, and the
+  session switches into it.
+- `POST /gateway/organizations/current/workspaces`: Org Admin only. The
+  creator becomes the new workspace's Workspace Admin too, so it stays theirs
+  if they stop being Org Admin. The session stays where it is.
+- Both count against the per-person allowance on workspaces created
+  (`GATEWAY_MAX_WORKSPACES_PER_USER`), the platform operator exempt. An
+  `invite_only` sign-up mode refuses creating an organization, but not an Org
+  Admin adding a workspace: it decides who comes onto the server, not what an
+  organization adds to itself.
 - `GET /gateway/organizations`: the caller's organizations and their role in
-  each. `GET /gateway/organizations/current/workspaces`: every workspace for an
+  each, read through the workspaces they may enter. An organization they
+  belong to without being in any of its workspaces is left out.
+  `GET /gateway/organizations/current/workspaces`: every workspace for an
   Org Admin, only the caller's own for a member.
+- Creating either is recorded in the new workspace's audit log.
 - `POST /tenants` keeps working for one release, creating an organization and
   its first workspace, then goes.
 
