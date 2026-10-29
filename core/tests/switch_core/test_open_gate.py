@@ -5,6 +5,7 @@ import logging
 import pytest
 from starlette.types import Message, Receive, Scope, Send
 
+from switch_core import open_gate
 from switch_core.open_gate import OpenGate
 
 
@@ -122,6 +123,11 @@ async def _answer_all(app: _Held, tasks: list[asyncio.Task[list[Message]]]) -> N
         await _settle()
 
 
+@pytest.fixture
+def short_wait(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(open_gate, "WAIT_S", 0.05)
+
+
 async def test_an_open_past_the_limit_waits_for_a_slot_and_then_runs() -> None:
     app = _Socket()
     gate = OpenGate(app, limit=1, clock=_Clock())
@@ -140,41 +146,38 @@ async def test_an_open_past_the_limit_waits_for_a_slot_and_then_runs() -> None:
     await asyncio.gather(first, second)
 
 
-async def test_no_open_is_refused_until_one_has_been_measured() -> None:
-    clock = _Clock()
+async def test_an_open_that_finds_no_slot_in_time_is_told_when_to_come_back(
+    short_wait: None,
+) -> None:
     app = _Held()
-    gate = OpenGate(app, limit=2, clock=clock, rand=lambda: 0.0)
-    opens = [asyncio.create_task(_open(gate, _scope(f"c{n}"))) for n in range(7)]
+    gate = OpenGate(app, limit=1, clock=_Clock(), rand=lambda: 0.0)
+    running = asyncio.create_task(_open(gate, _scope("a")))
     await _settle()
-    assert app.calls == 2
-    assert not any(task.done() for task in opens)
 
-    clock.now += 1.0  # the first open took 1 s
-    app.answers[0].set()
-    await _settle()
-    # Two of the five waiting keep waiting, and the first of them has the freed
-    # slot. The three behind them are told to come back one slot (1 s over 2)
-    # apart, after those two.
-    assert app.calls == 3
-    told = [_told(await task) for task in opens[4:]]
-    assert told == pytest.approx([1.5, 2.0, 2.5])
+    told = _told(await _open(gate, _scope("b", "/agents/b1/connection/ws")))
+    assert app.calls == 1  # refused before authentication or anything else
+    # No open has finished yet, so one is taken to last at least the wait that
+    # just ran out with the slot still taken: one slot from now.
+    assert told == pytest.approx(open_gate.WAIT_S)
 
-    await _answer_all(app, opens)
+    await _answer_all(app, [running])
 
 
-async def test_an_open_behind_a_full_line_is_told_when_to_come_back() -> None:
+async def test_more_waiting_than_can_get_a_slot_in_time_are_refused_at_once() -> None:
     clock = _Clock()
     app = _Held()
     gate = OpenGate(app, limit=1, clock=clock, rand=lambda: 0.0)
     await _measure(gate, app, clock, 0.5)
-    line = [asyncio.create_task(_open(gate, _scope(c))) for c in ("a", "b")]
+    # One slot, opens taking 0.5 s: four get a slot within the 2 s wait.
+    line = [asyncio.create_task(_open(gate, _scope(c))) for c in "abcde"]
     await _settle()
-    calls = app.calls
+    assert sum(task.done() for task in line) == 0
 
-    told = _told(await _open(gate, _scope("c", "/agents/c1/connection/ws")))
-    # A slot frees every 0.5 s, and "c" is behind "b": two slots from now.
-    assert told == pytest.approx(1.0)
-    assert app.calls == calls  # refused before authentication or anything else
+    fifth_waiting = asyncio.create_task(_open(gate, _scope("f")))
+    await _settle()
+    assert fifth_waiting.done()  # refused at once, not after the wait
+    # Behind the four waiting, one slot (0.5 s) each.
+    assert _told(fifth_waiting.result()) == pytest.approx(2.5)
 
     await _answer_all(app, line)
 
@@ -215,54 +218,17 @@ async def test_a_caller_refused_again_before_its_time_keeps_its_time() -> None:
     assert gate._retry_after("next", clock.now) == pytest.approx(first)
 
 
-async def test_a_caller_back_at_its_time_waits_even_when_the_line_is_full() -> None:
+async def test_the_line_goes_no_further_than_the_callers_it_remembers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(open_gate, "MAX_TRACKED", 3)
     clock = _Clock()
-    app = _Held()
-    gate = OpenGate(app, limit=1, clock=clock, rand=lambda: 0.0)
-    await _measure(gate, app, clock, 0.5)
-    line = [asyncio.create_task(_open(gate, _scope(c))) for c in ("a", "b")]
-    await _settle()
-    told = _told(await _open(gate, _scope("c")))
-    assert told is not None
-
-    clock.now += told
-    back = asyncio.create_task(_open(gate, _scope("c")))
-    await _settle()
-    assert not back.done()  # waiting behind "b", though the line was full
-    assert _told(await _open(gate, _scope("d"))) is not None  # a newcomer is not
-
-    # The slots go in arrival order: "a" answers, then "b" runs, then "c".
-    app.answers[1].set()
-    await _settle()
-    assert app.calls == 3
-    app.answers[2].set()
-    await _settle()
-    assert app.calls == 4
-
-    await _answer_all(app, [*line, back])
-    assert _told(back.result()) is None
-
-
-async def test_a_caller_back_long_after_its_time_lines_up_like_anyone_else() -> None:
-    clock = _Clock()
-    app = _Held()
-    gate = OpenGate(app, limit=1, clock=clock, rand=lambda: 0.0)
-    await _measure(gate, app, clock, 0.5)
-    line = [asyncio.create_task(_open(gate, _scope(c))) for c in ("a", "b")]
-    await _settle()
-    told = _told(await _open(gate, _scope("c")))
-    assert told is not None
-
-    # Back more than one open's time (0.5 s) after its slot: as a time kept
-    # from an earlier storm, for a caller that opened on another pod since.
-    clock.now += told + 0.6
-    again = asyncio.create_task(_open(gate, _scope("c")))
-    await _settle()
-    assert again.done()  # refused at once, not waiting past the limit
-    # A new place, behind "b", not the old one.
-    assert _told(again.result()) == pytest.approx(1.0)
-
-    await _answer_all(app, line)
+    gate = OpenGate(_Held(), limit=1, clock=clock, rand=lambda: 0.0)
+    gate._open_s.append(1.0)
+    times = [gate._retry_after(f"caller-{n}", clock.now) for n in range(5)]
+    # Three callers' worth of one-second slots, and no further.
+    assert times == pytest.approx([1.0, 2.0, 3.0, 3.0, 3.0])
+    assert len(gate._given) == 3
 
 
 async def test_an_open_that_goes_away_while_waiting_leaves_no_slot_taken() -> None:
@@ -314,12 +280,12 @@ async def test_an_open_handed_a_slot_as_it_goes_away_passes_the_slot_on() -> Non
     await asyncio.gather(running, staying)
 
 
-async def test_a_controller_open_is_refused_in_the_management_envelope() -> None:
-    clock = _Clock()
+async def test_a_controller_open_is_refused_in_the_management_envelope(
+    short_wait: None,
+) -> None:
     app = _Held()
-    gate = OpenGate(app, limit=1, clock=clock)
-    await _measure(gate, app, clock, 0.5)
-    line = [asyncio.create_task(_open(gate, _scope(c))) for c in ("a", "b")]
+    gate = OpenGate(app, limit=1, clock=_Clock())
+    running = asyncio.create_task(_open(gate, _scope("a")))
     await _settle()
 
     sent = await _open(gate, _scope("ctl-token"))
@@ -330,7 +296,7 @@ async def test_a_controller_open_is_refused_in_the_management_envelope() -> None
     assert error["retryable"] is True
     assert int(headers[b"retry-after"]) >= error["retry_after_s"]
 
-    await _answer_all(app, line)
+    await _answer_all(app, [running])
 
 
 async def test_other_routes_and_a_limit_of_0_are_not_paced() -> None:
@@ -353,13 +319,13 @@ async def test_other_routes_and_a_limit_of_0_are_not_paced() -> None:
 
 
 async def test_one_line_is_logged_when_refusing_starts_and_one_when_it_is_over(
-    caplog: pytest.LogCaptureFixture,
+    short_wait: None, caplog: pytest.LogCaptureFixture
 ) -> None:
     clock = _Clock()
     app = _Held()
     gate = OpenGate(app, limit=1, clock=clock, rand=lambda: 0.0)
     await _measure(gate, app, clock, 0.5)
-    line = [asyncio.create_task(_open(gate, _scope(c))) for c in ("a", "b")]
+    running = asyncio.create_task(_open(gate, _scope("a")))
     await _settle()
 
     with caplog.at_level(logging.WARNING, logger="switch_core.open_gate"):
@@ -368,6 +334,6 @@ async def test_one_line_is_logged_when_refusing_starts_and_one_when_it_is_over(
         assert len(caplog.records) == 1
 
         clock.now += 10.0  # every time given has passed
-        await _answer_all(app, line)
+        await _answer_all(app, [running])
     assert len(caplog.records) == 2
     assert "3 were told to come back" in caplog.records[1].getMessage()

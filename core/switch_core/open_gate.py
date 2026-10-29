@@ -9,29 +9,16 @@ deleted), the opens took the whole pool: thousands of pool timeouts, opens
 that failed after their incarnation was made, and the surviving pod's lease
 lapsing, which made it drop agents of its own.
 
-This middleware runs at most `limit` opens at once in this process, and takes
-every other number it needs from how long opens take here. An open that finds
-every slot taken waits for one, in arrival order, if fewer than `limit` opens
-are waiting already: those get the next slots to free, each within about the
-time one open takes. Any other open is refused before authentication or the
-database, with `retry_after_s`, its place in the line. A slot frees every
-median open time over `limit` (the median of the last `limit` opens), so a
-storm comes back spread over the time the process needs to take it, and the
-line slows down when the database does. Until one open has finished there is
-nothing to measure, so no open is refused; when the first finishes, the opens
-waiting past the first `limit` are told their times.
-
-A caller refused again before its time keeps that time, so a client that
-retries at once cannot push everyone else's back, and a caller back at its time
-waits for a slot even when `limit` are waiting, so the opens that arrived since
-cannot push it back either. At its time means up to one median open time
-after it. Later than that, the caller has missed its slot and lines up like
-anyone else. That matters beyond the one caller: a caller refused here often
-opens on another pod, so this process's times outlive the storm they were
-given in, and taken as still due they would let a whole later storm past the
-limit on waiting, to wait longer than the proxies in front of this process
-allow. A proxy that gives up leaves an open this process still runs, which
-moves the connection on behind its client's back.
+This middleware runs at most `limit` opens at once in this process. An open
+that finds every slot taken waits up to `WAIT_S` for one. Past that, or when
+more opens are waiting already than can get a slot within `WAIT_S`, it is
+refused before authentication or the database, with `retry_after_s`: its place
+in the line. The line moves one slot every median open time over `limit` (the
+median of the last `limit` opens), so a storm comes back spread over the time
+the process needs to take it, at the pace opens are going here, and the line
+slows down when the database does. A caller refused again before its time
+keeps that time, so a client that retries at once cannot push everyone else's
+back.
 
 An open is done when its first frame or response body goes out (the
 `connection_state`, or a refusal) or the request ends. What follows is the
@@ -43,7 +30,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import itertools
 import json
 import logging
 import math
@@ -62,11 +48,21 @@ from switch_core.refusal_breaker import bearer_caller
 
 logger = logging.getLogger(__name__)
 
-# The gate answers before authentication, so a caller that never authenticates
-# takes a place in the line too. These bound what such callers can cost: how
-# far back they push the times real callers are given, and the memory their
-# places take.
-MAX_RETRY_S = 300.0
+# How long an open waits for a slot before it is told when to come back. The
+# wait and the open after it have to fit well inside the timeout of the
+# proxies in front of switch-core: the tailnet ingress gives up on a request
+# after about 10 s (measured on dev-abel, 29 Oct 2026). An open that outwaits
+# a proxy still runs here after the proxy has given up, which moves the
+# connection on behind its client's back, and today's agent runtime gives up
+# for good on the refusal that follows. 2 s leaves most of the 10 s to the open
+# itself and to proxies that give up sooner.
+WAIT_S = 2.0
+# The callers whose come-back time is remembered, which bounds this memory to a
+# few MB. The gate answers before authentication, so a caller that never
+# authenticates takes a place in the line too; the line given out goes no
+# further than these callers' worth of slots, which bounds how far such
+# callers can push back the times real ones are given. 10,000 is about the
+# most agents one deployment has been tested with.
 MAX_TRACKED = 10_000
 
 BUSY = "busy"
@@ -99,9 +95,8 @@ def _route(scope: Scope) -> str | None:
 @dataclass(eq=False)
 class _Waiter:
     caller: str | None
-    # Set to None when a slot is handed to this open, or to when it is to come
-    # back, in seconds.
-    told: asyncio.Future[float | None]
+    # Set when a slot is handed to this open.
+    slot: asyncio.Future[None]
 
 
 class OpenGate:
@@ -165,71 +160,73 @@ class OpenGate:
             release()
 
     async def _enter(self, caller: str | None) -> float | None:
-        """Take a slot, waiting for one when this open is near enough the front
-        of the line. None once the open holds a slot; otherwise when it is to
-        come back, in seconds."""
-        now = self._clock()
+        """Take a slot, waiting up to `WAIT_S` for one. None once the open holds
+        a slot; otherwise when it is to come back, in seconds."""
         if self._running < self._slots and not self._waiting:
             self._running += 1
             self._forget(caller)
             return None
-        given = self._given.get(caller) if caller is not None else None
-        on_time = given is not None and given <= now <= given + self._open_time()
-        if given is not None and given + self._open_time() < now:
-            self._forget(caller)  # it missed its slot
-        if self._open_s and len(self._waiting) >= self._slots and not on_time:
-            return self._retry_after(caller, now)
+        if len(self._waiting) >= self._most_waiting():
+            return self._retry_after(caller, self._clock())
 
         waiter = _Waiter(caller, asyncio.get_running_loop().create_future())
         self._waiting.append(waiter)
         try:
-            told = await waiter.told
-        except asyncio.CancelledError:
-            if waiter.told.cancelled():
+            async with asyncio.timeout(WAIT_S):
+                await waiter.slot
+        except TimeoutError:
+            if not waiter.slot.done() or waiter.slot.cancelled():
                 with contextlib.suppress(ValueError):
                     self._waiting.remove(waiter)
-            elif waiter.told.result() is None:
+                return self._retry_after(caller, self._clock())
+            # Handed a slot as the wait ran out: it is this open's.
+        except asyncio.CancelledError:
+            if waiter.slot.cancelled():
+                with contextlib.suppress(ValueError):
+                    self._waiting.remove(waiter)
+            else:
                 # Handed a slot as the request went away: the next one has it.
                 self._pass_slot()
             raise
-        if told is None:
-            self._forget(caller)
-        return told
+        self._forget(caller)
+        return None
 
     def _release(self, took: float) -> None:
-        first = not self._open_s
         self._open_s.append(took)
-        if first:
-            self._tell_the_line()
         self._pass_slot()
         self._note_line_through()
 
     def _pass_slot(self) -> None:
         while self._waiting:
             waiter = self._waiting.popleft()
-            if not waiter.told.done():
-                waiter.told.set_result(None)
+            if not waiter.slot.done():
+                waiter.slot.set_result(None)
                 return
         self._running -= 1
 
-    def _tell_the_line(self) -> None:
-        """Tell the opens that waited past the first `limit`, while there was
-        nothing to measure yet, when to come back."""
-        self._waiting = deque(w for w in self._waiting if not w.told.done())
-        past = list(itertools.islice(self._waiting, self._slots, None))
-        for _ in past:
-            self._waiting.pop()
-        now = self._clock()
-        for waiter in past:
-            waiter.told.set_result(self._retry_after(waiter.caller, now))
+    def _open_time(self) -> float:
+        """How long an open takes here: the median of the last `limit`. Before
+        any has finished, at least `WAIT_S`, the time an open has just waited
+        with every slot taken and none of them done."""
+        return statistics.median(self._open_s) if self._open_s else WAIT_S
+
+    def _most_waiting(self) -> float:
+        """The most opens worth keeping waiting: as many as get a slot within
+        `WAIT_S` at the pace opens are going here. An open past them would
+        wait out `WAIT_S` and be refused anyway, so it is refused at once.
+        Before any open has finished there is no pace to go by, and `WAIT_S`
+        alone bounds the wait."""
+        if not self._open_s or self._open_time() <= 0:
+            return math.inf
+        return WAIT_S * self._slots / self._open_time()
 
     def _retry_after(self, caller: str | None, now: float) -> float:
         """When this caller is to come back, in seconds: its place in the line.
 
-        A slot frees every median open time over `limit`. The first caller told
-        to come back is behind the opens waiting here, each one after it a slot
-        later, at a random point within its slot. A caller already given a time
-        that has not come keeps it."""
+        The line moves one slot every open time over `limit`. The first caller
+        told to come back is behind the opens waiting here, each one after it a
+        slot later, at a random point within its slot. A caller already given a
+        time that has not come keeps it."""
         if caller is not None:
             at = self._given.get(caller)
             if at is not None and at > now:
@@ -238,17 +235,13 @@ class OpenGate:
         spacing = self._open_time() / self._slots
         start = max(now + (len(self._waiting) + 1) * spacing, self._next_at)
         self._next_at = start + spacing
-        at = min(start + spacing * self._rand(), now + MAX_RETRY_S)
+        at = min(start + spacing * self._rand(), now + MAX_TRACKED * spacing)
         if caller is not None:
             self._given[caller] = at
             self._given.move_to_end(caller)
             while len(self._given) > MAX_TRACKED:
                 self._given.popitem(last=False)
         return at - now
-
-    def _open_time(self) -> float:
-        """How long an open takes here: the median of the last `limit`."""
-        return statistics.median(self._open_s) if self._open_s else 0.0
 
     def _forget(self, caller: str | None) -> None:
         if caller is not None:

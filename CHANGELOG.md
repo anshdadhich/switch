@@ -91,12 +91,12 @@ version of their own to them without also giving them a release of their own.
   those opens took the whole database pool: requests and the process lease
   timed out with them, and the surviving pod dropped agents of its own. Each
   process now opens at most `AGENT_OPEN_LIMIT` (8) agent and controller
-  connections at once, and as many again wait for a slot. Any other open is
-  refused before authentication with 503 and `retry_after_s`, its place in
-  the line at the pace opens are taking in that process, so the storm comes
-  back as a queue spread over what the process can take. A caller that comes
-  back early keeps its time, and one back at its time is not pushed back by
-  newer arrivals. `switch.agent.opens_deferred` counts the refusals, by route.
+  connections at once. An open that finds no slot within 2 s, which keeps it
+  well inside the timeout of the proxy in front, is refused before
+  authentication with 503 and `retry_after_s`, its place in the line at the
+  pace opens are taking in that process, so the storm comes back as a queue
+  spread over what the process can take. A caller that comes back early keeps
+  its time. `switch.agent.opens_deferred` counts the refusals, by route.
 - **The `[CONN]` log lines say when a client fell back to the event stream.**
   `/events` takes optional `fallback` and `fallback_close_code` parameters,
   and the `[CONN] opened` and `[CONN] reattached` lines end with
