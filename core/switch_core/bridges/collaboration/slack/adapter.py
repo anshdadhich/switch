@@ -32,6 +32,7 @@ from switch_core.bridges.collaboration.adapter import (
     RichContent,
     RichContentFailed,
     RichContentThrottled,
+    RichContentThrottledAfterPost,
     RichContentWedged,
     TurnActivity,
 )
@@ -362,6 +363,16 @@ _STREAMING_CONFLICT = "streaming_state_conflict"
 # redraw now puts it; claiming a slot the message never reached costs a thin
 # rule under a finished turn, which is what a retired control leaves anyway.
 _STRANDED_BLOCKS: dict[str, dict[str, Any]] = {slot: {} for slot in STREAM_SLOTS}
+
+
+class _StreamClosed(RichContentFailed):
+    """An append refused because Slack has stopped taking appends for good.
+
+    Its own type so that `update_rich` can draw the turn as an ordinary edit
+    in the same call, rather than leaving the message as Slack left it until
+    the turn next changes. To every other caller it is the `RichContentFailed`
+    it inherits from.
+    """
 
 
 class _StreamNotClosed(RichContentFailed):
@@ -995,8 +1006,16 @@ class SlackAdapter(PlatformAdapter):
             )
         stream = self._streams.get(message_ref)
         if stream is not None and isinstance(content, TurnActivity):
-            await self._extend_stream(stream, message_ref, content)
-            return
+            try:
+                await self._extend_stream(stream, message_ref, content)
+            except _StreamClosed:
+                # Slack closes every stream ten minutes after it opens, however
+                # recently it was appended to, and marks the steps still
+                # running as failed. Edited now, those read right again
+                # straight away rather than at the turn's next change.
+                pass
+            else:
+                return
         if message_ref in self._unredrawable:
             if not self._unredrawable[message_ref]:
                 self._unredrawable[message_ref] = True
@@ -1256,6 +1275,9 @@ class SlackAdapter(PlatformAdapter):
             return 30.0
         return max(1.0, delay) if math.isfinite(delay) else 30.0
 
+    def rich_updates_held_for(self) -> float:
+        return self._rich_update_cooldown.remaining()
+
     def _streamable(self, content: RichContent, thread_root_id: str | None) -> bool:
         """Whether this is a turn's activity, in a thread a stream can open in.
 
@@ -1394,7 +1416,14 @@ class SlackAdapter(PlatformAdapter):
         ref = f"{channel_id}:{ts}"
         stream = _ActivityStream(channel_id=channel_id, ts=str(ts))
         self._register_stream(ref, stream)
-        await self._extend_stream(stream, ref, content)
+        try:
+            await self._extend_stream(stream, ref, content)
+        except RichContentThrottled as throttled:
+            # The message exists now. Reported as not posted, the turn would
+            # be posted again on the retry, leaving this one empty above it.
+            raise RichContentThrottledAfterPost(
+                ref=ref, retry_after=throttled.retry_after, text=throttled.text
+            ) from throttled
         return ref
 
     def _register_stream(self, message_ref: str, stream: _ActivityStream) -> None:
@@ -1575,20 +1604,21 @@ class SlackAdapter(PlatformAdapter):
     ) -> NoReturn:
         """Turn a refused append into the failure the caller already handles.
 
-        A stream that has been stopped, or that this app no longer owns, is
-        gone rather than temporarily unwell: forget it so the publication is
-        redrawn as an ordinary post rather than appended to forever.
+        A stream that has been stopped, timed out, or that this app no longer
+        owns, is gone rather than temporarily unwell: forget it so the
+        publication is redrawn as an ordinary post rather than appended to
+        forever.
         """
         code = error.response.get("error")
         if code in _STREAM_CLOSED_ERRORS:
             self._streams.pop(message_ref, None)
             logger.warning(
                 "The activity stream %s is no longer accepting appends (%s); "
-                "later updates will be drawn as an ordinary message.",
+                "the turn is drawn as an ordinary message from here.",
                 message_ref,
                 code,
             )
-            raise RichContentFailed(
+            raise _StreamClosed(
                 f"Slack closed the activity stream {message_ref}: {code}", text=text
             ) from error
         throttled = self._throttled(error, text)

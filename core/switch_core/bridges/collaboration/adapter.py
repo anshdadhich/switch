@@ -312,6 +312,25 @@ class RichContentThrottled(RichContentFailed):
         self.retry_after = retry_after
 
 
+class RichContentThrottledAfterPost(RichContentThrottled):
+    """The message was posted, but the platform asked for a wait before what
+    goes in it could be drawn.
+
+    Slack opens a turn's stream and then takes its content in a separate call,
+    and the second can be refused after the first has made the message. `ref`
+    names that message, so the caller keeps it and draws into it after the
+    wait rather than posting again, which would leave a second message in the
+    thread and the first one empty.
+
+    A `RichContentThrottled`, so a caller that has no use for the message it
+    is told about still waits and tries again, as it did before.
+    """
+
+    def __init__(self, *, ref: str, retry_after: float, text: str) -> None:
+        super().__init__(retry_after=retry_after, text=text)
+        self.ref = ref
+
+
 class RichContentWedged(RichContentFailed):
     """The platform will not change this message, and never will again.
 
@@ -1388,6 +1407,16 @@ class PlatformAdapter(ABC):
         turn's working mark at the same time. An adapter that declares no
         `supports_queue_reaction` is never asked for the queued one.
         """
+
+    def rich_updates_held_for(self) -> float:
+        """Seconds before this adapter will try another edit to rich content.
+
+        Nonzero while it is holding edits back after a rate limit. Asked before
+        work that can wait, such as redrawing a running turn's clock, so that
+        work is not queued only to be refused. Only an adapter that
+        `redraws_for_elapsed_time` is asked.
+        """
+        return 0.0
 
     async def notify_working(
         self, channel_id: str, agent_name: str, thread_root_id: str | None

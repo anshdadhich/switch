@@ -200,6 +200,21 @@ version of their own to them without also giving them a release of their own.
   Existing duplicates are left as they are and can be reached by id.
 
 #### Fixed
+- **On Slack, the 👀 and the activity card no longer arrive after the agent's
+  reply.** Every running turn's card was redrawn every 5 seconds to tick its
+  clock. Slack closes a streamed card after 10 minutes, so on a longer turn
+  each tick was a full message edit, and Slack allows about 50 of those a
+  minute for the whole workspace. A few long turns used that up, Slack made the
+  bridge wait, and new turns' cards and 👀 waited behind the clock redraws. The
+  clock now moves once a minute, and a running card shows whole minutes
+  ("Working… 3m"). Clock redraws stop while Slack is making the bridge wait,
+  and new turns go ahead of them. The 👀 goes on as soon as a turn starts
+  rather than once its card has posted. A card is redrawn as soon as Slack
+  closes its stream, instead of showing still-running steps as failed until
+  the next change. A turn whose first draw Slack throttles keeps its card
+  rather than posting a second one. A turn that has reported nothing for an
+  hour (usually one whose agent session died without ending it) is left as it
+  was last drawn, rather than redrawn for its clock and again on every restart.
 - **The agent HTTP API answers a refused or malformed request with a 4xx, not
   a 500.** Inviting an agent to a room the caller may not change answered 500
   instead of 403, and so did looking up a room the agent is not in. A room

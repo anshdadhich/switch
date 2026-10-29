@@ -16,6 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
+from switch_core.bridges.collaboration.session.renderers import RUNNING_CLOCK_SECONDS
 from switch_core.db.models import AgentSessionActivityItem
 from switch_core.db.stores.session_activity_store import TURN_ITEM_ID
 from switch_core.sessions.contract import TURN_ENDED, Item, TurnUpsert
@@ -98,14 +99,15 @@ def status_state(
     """What the turn's message is showing, so an unchanged redraw can be skipped.
 
     The turn's state and its tools count. The clock counts only where the
-    platform redraws for it. What the agent is saying does not: prose is
+    platform redraws for it, and then in the whole minutes a running turn
+    shows. What the agent is saying does not: prose is
     revised on every token, and it goes out with the next change to either,
     and with the edit that ends the turn. The turn a stop control names
     counts, so a queued turn's message stops offering to stop a turn that
     has ended.
     """
     clock = (
-        str(int(elapsed_seconds))
+        str(int(elapsed_seconds // RUNNING_CLOCK_SECONDS))
         if clock_redraws and elapsed_seconds is not None
         else ""
     )

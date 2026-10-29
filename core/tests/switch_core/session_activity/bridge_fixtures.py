@@ -11,7 +11,12 @@ from typing import Any
 
 from sqlalchemy import insert
 
-from switch_core.bridges.collaboration.adapter import RichContent, RichContentFailed
+from switch_core.bridges.collaboration.adapter import (
+    RichContent,
+    RichContentFailed,
+    RichContentThrottledAfterPost,
+    TurnActivity,
+)
 from switch_core.db.models import Client, CollaborationBridge, Room, room_agents
 
 
@@ -79,6 +84,14 @@ class RecordingPlatform:
     drawn: list[Drawn] = field(default_factory=list)
     marks: list[tuple[str, str, bool]] = field(default_factory=list)
     refuse_posts: bool = False
+    # Raised for every post of a turn's activity while its turn id is here.
+    turn_post_errors: dict[str, RichContentFailed] = field(default_factory=dict)
+    # Turns whose next post opens a message, then is asked to wait before
+    # drawing into it.
+    open_undrawn: set[str] = field(default_factory=set)
+    # Raised for every update while set.
+    update_error: RichContentFailed | None = None
+    held_for: float = 0.0
     found_card: str | None = None
     first_reply: bool = True
     _next: int = 0
@@ -96,7 +109,18 @@ class RecordingPlatform:
     ) -> str:
         if self.refuse_posts:
             raise RichContentFailed("refused", text="")
+        turn_id = (
+            content.turn.turn_id
+            if isinstance(content, TurnActivity) and not content.status_only
+            else None
+        )
+        if turn_id in self.turn_post_errors:
+            raise self.turn_post_errors[turn_id]
         ref = self._ref()
+        if turn_id in self.open_undrawn:
+            self.open_undrawn.discard(turn_id)
+            self.drawn.append(Drawn("opened", channel_id, ref, thread_root_id, None))
+            raise RichContentThrottledAfterPost(ref=ref, retry_after=0.2, text="")
         self.drawn.append(Drawn("post_rich", channel_id, ref, thread_root_id, content))
         return ref
 
@@ -108,9 +132,14 @@ class RecordingPlatform:
         content: RichContent,
         thread_root_id: str | None,
     ) -> None:
+        if self.update_error is not None:
+            raise self.update_error
         self.drawn.append(
             Drawn("update_rich", channel_id, message_ref, thread_root_id, content)
         )
+
+    def rich_updates_held_for(self) -> float:
+        return self.held_for
 
     async def send_message(
         self,
