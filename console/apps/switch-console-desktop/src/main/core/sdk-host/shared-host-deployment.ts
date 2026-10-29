@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, posix } from 'node:path';
 import { resolveSharedHostBundlePath } from '@main/core/agent-runtime/impl/resolve-sidecar-bundle';
@@ -49,12 +49,20 @@ export async function locateSharedHost(
   return locateBundle(transport, dir, await bundleName());
 }
 
+/** The last bundle hashed, so a file that has not changed is not read again. */
+let hashed: { path: string; mtimeMs: number; size: number; name: string } | null = null;
+
 /** This build's bundle's file name on a host: named after its SHA-256. */
 async function bundleName(): Promise<string> {
+  const path = resolveSharedHostBundlePath();
+  const { mtimeMs, size } = await stat(path);
+  if (hashed?.path === path && hashed.mtimeMs === mtimeMs && hashed.size === size)
+    return hashed.name;
   const hash = createHash('sha256')
-    .update(await readFile(resolveSharedHostBundlePath()))
+    .update(await readFile(path))
     .digest('hex');
-  return `shared-host-${hash}.mjs`;
+  hashed = { path, mtimeMs, size, name: `shared-host-${hash}.mjs` };
+  return hashed.name;
 }
 
 async function locateBundle(
@@ -70,18 +78,6 @@ async function locateBundle(
   ctx.dispose();
   return null;
 }
-
-/**
- * Makes a private directory (mkdtemp makes it 0700) to stage one request in,
- * under the staging directory, and prints its path. Argument: the staging
- * directory.
- */
-const MAKE_REQUEST_DIR = String.raw`
-const fs = require('node:fs'), path = require('node:path');
-const [staging] = process.argv.slice(1);
-fs.mkdirSync(staging, { recursive: true, mode: 0o700 });
-console.log(fs.mkdtempSync(path.join(staging, 'launch-')));
-`;
 
 /** How much a one-off command may print here before Node stops reading it. */
 const REQUEST_MAX_BUFFER = 64 * 1024 * 1024;
@@ -132,7 +128,12 @@ export async function runHostRequest(
   const ctx = new SshExecutionContext(proxy, { root: transport.dir });
   let staged: string | null = null;
   try {
-    staged = (await ctx.exec('node', ['-e', MAKE_REQUEST_DIR, bundle.staging])).stdout.trim();
+    // Staged as a launch is, and sweeping what abandoned launches left: the
+    // script takes a state root, and finds `sdk-launch` beside its kind.
+    const root = posix.join(posix.dirname(bundle.staging), 'sdk-sessions', 'cli-conversations');
+    staged = (
+      await ctx.exec('node', ['-e', MAKE_LAUNCH_DIR, root, String(STALE_LAUNCH_MS)])
+    ).stdout.trim();
     const local = await mkdtemp(join(tmpdir(), 'switch-sdk-request-'));
     const fs = new SshFileSystem(proxy, staged);
     try {

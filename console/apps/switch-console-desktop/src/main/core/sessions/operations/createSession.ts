@@ -18,6 +18,7 @@ import { forkCliConversation } from '../cli-conversations';
 import { provisionSessionRuntime } from '../session-builder';
 import { sessionRuntimeManager } from '../session-runtime-manager';
 import { mapSessionRowToSession } from '../utils/utils';
+import { setProviderSessionId } from './set-provider-session-id';
 
 /**
  * What the session's host tells Switch about how it started. `adopted` never
@@ -107,10 +108,9 @@ export async function createSession(
         params.cliConversation.nativeSessionId,
         params.cliConversation.confirmedClosed
       );
-      await db
-        .update(sessions)
-        .set({ config: { ...configObj, providerSessionId } })
-        .where(eq(sessions.id, session.id));
+      // Into the row as it stands after the copy, which can take a while.
+      if (!(await setProviderSessionId(session.id, providerSessionId)))
+        throw new Error('This session was deleted while its conversation was being copied.');
       session = { ...session, providerSessionId };
     } catch (e) {
       await db.delete(sessions).where(eq(sessions.id, session.id));

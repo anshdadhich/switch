@@ -30,8 +30,11 @@ export function useCliConversations(agentId: string | null): {
     queryKey: ['cliConversations', agentId],
     queryFn: () => rpc.sessions.listCliConversations(agentId!),
     enabled: agentId !== null,
-    // Whether a terminal has one open changes from minute to minute.
+    // Read afresh each time the dialog opens, since whether a terminal has one
+    // open changes from minute to minute, but not on every return to the
+    // window: each read runs on the agent's host. The copy checks again.
     staleTime: 0,
+    refetchOnWindowFocus: false,
   });
   const result = query.data;
   return {

@@ -13,6 +13,11 @@ const mocks = vi.hoisted(() => ({
   registerSession: vi.fn(),
   startSession: vi.fn(),
   forkCliConversation: vi.fn(),
+  setProviderSessionId: vi.fn(),
+}));
+
+vi.mock('./set-provider-session-id', () => ({
+  setProviderSessionId: mocks.setProviderSessionId,
 }));
 
 vi.mock('../cli-conversations', () => ({
@@ -109,6 +114,7 @@ describe('createSession', () => {
 
   it('continues a copy of a CLI conversation, recording which one it continues', async () => {
     mocks.forkCliConversation.mockResolvedValue('copy-1');
+    mocks.setProviderSessionId.mockResolvedValue(true);
     const cliConversation = { nativeSessionId: 'cli-1', title: 'Fix the build' };
     const result = await createSession({
       ...baseParams,
@@ -126,9 +132,7 @@ describe('createSession', () => {
     expect(mocks.insert.mock.invocationCallOrder[0]).toBeLessThan(
       mocks.forkCliConversation.mock.invocationCallOrder[0]!
     );
-    expect(mocks.set).toHaveBeenCalledWith({
-      config: { cliConversation, providerSessionId: 'copy-1' },
-    });
+    expect(mocks.setProviderSessionId).toHaveBeenCalledWith('session-1', 'copy-1');
     expect(result.data.session.providerSessionId).toBe('copy-1');
     expect(result.data.session.cliConversation).toEqual(cliConversation);
     expect(mocks.startSession).toHaveBeenCalledWith(
@@ -137,6 +141,24 @@ describe('createSession', () => {
       undefined,
       null
     );
+  });
+
+  it('does not start a session deleted while its conversation was being copied', async () => {
+    mocks.forkCliConversation.mockResolvedValue('copy-1');
+    mocks.setProviderSessionId.mockResolvedValue(false);
+    const result = await createSession({
+      ...baseParams,
+      cliConversation: { nativeSessionId: 'cli-1', title: 'Fix the build', confirmedClosed: false },
+    });
+    expect(result).toEqual({
+      success: false,
+      error: {
+        type: 'spawn-failed',
+        message: 'This session was deleted while its conversation was being copied.',
+      },
+    });
+    expect(mocks.provisionSessionRuntime).not.toHaveBeenCalled();
+    expect(mocks.startSession).not.toHaveBeenCalled();
   });
 
   it('takes the session away again when the CLI conversation cannot be copied', async () => {
