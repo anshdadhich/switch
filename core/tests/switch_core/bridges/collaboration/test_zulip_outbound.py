@@ -155,6 +155,8 @@ async def test_a_file_is_uploaded_and_linked_from_the_message() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append(request)
         if request.url.path == "/api/v1/user_uploads":
+            # Zulip's multipart field for the file is `filename`, not `file`.
+            assert b'name="filename"' in request.content
             assert b"notes.txt" in request.content
             return httpx.Response(
                 200, json={"result": "success", "uri": "/user_uploads/2/ab/notes.txt"}
@@ -218,7 +220,11 @@ async def test_a_private_room_asks_for_a_private_stream() -> None:
 
     await adapter.create_channel("secret", "topic", channel_type="channel_private")
 
-    assert '"invite_only": true' in _form(seen[0])["subscriptions"][0]
+    form = _form(seen[0])
+    # Top-level in Zulip's schema; a subscription item carries only name,
+    # description and colour.
+    assert form["invite_only"] == ["true"]
+    assert "invite_only" not in form["subscriptions"][0]
 
 
 async def test_the_deeplink_opens_the_stream_in_the_organization() -> None:

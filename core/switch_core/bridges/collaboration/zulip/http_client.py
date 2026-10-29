@@ -205,9 +205,15 @@ class ZulipClient:
         )
 
     async def upload(self, *, filename: str, mimetype: str, data: bytes) -> str:
-        """Put a file on the organization and return the URI a message links to."""
+        """Put a file on the organization and return the URI a message links to.
+
+        The multipart field is `filename`, which reads like a name rather than
+        a file and is Zulip's own spelling for it (checked against the
+        published OpenAPI schema); a `file` field is ignored, and the upload
+        then fails as an empty request.
+        """
         body = await self._request(
-            "POST", "/user_uploads", files={"file": (filename, data, mimetype)}
+            "POST", "/user_uploads", files={"filename": (filename, data, mimetype)}
         )
         return str(body.get("uri") or "")
 
@@ -257,9 +263,12 @@ class ZulipClient:
         so in its answer when it does not.
         """
         subscription: dict[str, Any] = {"name": stream, "description": description}
-        if invite_only:
-            subscription["invite_only"] = True
         payload: dict[str, Any] = {"subscriptions": json.dumps([subscription])}
+        if invite_only:
+            # A property of the request, not of the subscription: `subscriptions`
+            # items carry a name, a description and a colour, and Zulip reads
+            # privacy for the stream being created at the top level.
+            payload["invite_only"] = "true"
         if principals:
             payload["principals"] = json.dumps(principals)
         return await self._request("POST", "/users/me/subscriptions", data=payload)
