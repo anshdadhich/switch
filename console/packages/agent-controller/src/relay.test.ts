@@ -315,8 +315,8 @@ describe('the hub, over the relay’s WebSocket, read by openHubStream', () => {
     });
 
     await expect(
-      agentHost.stream.replacePlacements({ 'session-1': 'room-elsewhere' })
-    ).rejects.toThrow(/not a member of room room-elsewhere/);
+      agentHost.stream.replacePlacements({ 'session-1': 'room-a', 'session-2': 'room-a' })
+    ).rejects.toThrow(/more than one session/);
   });
 
   it('passes approval outcomes to the agent host', async () => {
@@ -507,6 +507,32 @@ describe('forwarding to Switch', () => {
     expect(forwarded.headers['x-switch-room-id']).toBeUndefined();
     expect(forwarded.headers['switch-controller-protocol']).toBe('2');
     expect(forwarded.body).toEqual({ row: 1 });
+  });
+
+  it('names a room the agent joined after its rooms were sent, once a session connects there', async () => {
+    // Switch answered connect_to_room for a room the controller's copy of the
+    // agent's rooms had not heard of yet. Refusing the placement left every
+    // later call from that session going out with no room.
+    const agentHost = host();
+    await connected(agentHost);
+    await agentHost.stream.replacePlacements({ 'session-1': 'room-just-joined' });
+
+    const posted = await callOperation(caller(), 'post_message', { body: 'hi' });
+    expect(posted.isError).toBeFalsy();
+    const forwarded = core.requests.findLast((r) => r.path.endsWith('/ops/post_message'))!;
+    expect(forwarded.headers['x-switch-room-id']).toBe('room-just-joined');
+  });
+
+  it('refuses placements while the hub is not connected, rather than reporting them taken', async () => {
+    const agentHost = host();
+    await connected(agentHost);
+    await relay.close();
+    await waitFor(() => agentHost.seen.disconnected.length > 0, 'the hub to drop');
+    await expect(agentHost.stream.replacePlacements({ 'session-1': 'room-a' })).rejects.toThrow(
+      /hub is not connected/
+    );
+    relay = newRelay();
+    await relay.start(null);
   });
 
   it('names the room of a call from its session’s placement on the hub', async () => {
