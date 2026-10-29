@@ -243,6 +243,28 @@ async def test_a_caller_back_at_its_time_waits_even_when_the_line_is_full() -> N
     assert _told(back.result()) is None
 
 
+async def test_a_caller_back_long_after_its_time_lines_up_like_anyone_else() -> None:
+    clock = _Clock()
+    app = _Held()
+    gate = OpenGate(app, limit=1, clock=clock, rand=lambda: 0.0)
+    await _measure(gate, app, clock, 0.5)
+    line = [asyncio.create_task(_open(gate, _scope(c))) for c in ("a", "b")]
+    await _settle()
+    told = _told(await _open(gate, _scope("c")))
+    assert told is not None
+
+    # Back more than one open's time (0.5 s) after its slot: as a time kept
+    # from an earlier storm, for a caller that opened on another pod since.
+    clock.now += told + 0.6
+    again = asyncio.create_task(_open(gate, _scope("c")))
+    await _settle()
+    assert again.done()  # refused at once, not waiting past the limit
+    # A new place, behind "b", not the old one.
+    assert _told(again.result()) == pytest.approx(1.0)
+
+    await _answer_all(app, line)
+
+
 async def test_an_open_that_goes_away_while_waiting_leaves_no_slot_taken() -> None:
     app = _Held()
     gate = OpenGate(app, limit=1, clock=_Clock())

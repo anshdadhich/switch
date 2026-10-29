@@ -22,9 +22,16 @@ nothing to measure, so no open is refused; when the first finishes, the opens
 waiting past the first `limit` are told their times.
 
 A caller refused again before its time keeps that time, so a client that
-retries at once cannot push everyone else's back, and a caller back at or
-after its time waits for a slot even when `limit` are waiting, so the opens
-that arrived since cannot push it back either.
+retries at once cannot push everyone else's back, and a caller back at its time
+waits for a slot even when `limit` are waiting, so the opens that arrived since
+cannot push it back either. At its time means up to one median open time
+after it. Later than that, the caller has missed its slot and lines up like
+anyone else. That matters beyond the one caller: a caller refused here often
+opens on another pod, so this process's times outlive the storm they were
+given in, and taken as still due they would let a whole later storm past the
+limit on waiting, to wait longer than the proxies in front of this process
+allow. A proxy that gives up leaves an open this process still runs, which
+moves the connection on behind its client's back.
 
 An open is done when its first frame or response body goes out (the
 `connection_state`, or a refusal) or the request ends. What follows is the
@@ -167,8 +174,10 @@ class OpenGate:
             self._forget(caller)
             return None
         given = self._given.get(caller) if caller is not None else None
-        back_in_time = given is not None and given <= now
-        if self._open_s and len(self._waiting) >= self._slots and not back_in_time:
+        on_time = given is not None and given <= now <= given + self._open_time()
+        if given is not None and given + self._open_time() < now:
+            self._forget(caller)  # it missed its slot
+        if self._open_s and len(self._waiting) >= self._slots and not on_time:
             return self._retry_after(caller, now)
 
         waiter = _Waiter(caller, asyncio.get_running_loop().create_future())
@@ -226,7 +235,7 @@ class OpenGate:
             if at is not None and at > now:
                 self._given.move_to_end(caller)
                 return at - now
-        spacing = statistics.median(self._open_s) / self._slots
+        spacing = self._open_time() / self._slots
         start = max(now + (len(self._waiting) + 1) * spacing, self._next_at)
         self._next_at = start + spacing
         at = min(start + spacing * self._rand(), now + MAX_RETRY_S)
@@ -236,6 +245,10 @@ class OpenGate:
             while len(self._given) > MAX_TRACKED:
                 self._given.popitem(last=False)
         return at - now
+
+    def _open_time(self) -> float:
+        """How long an open takes here: the median of the last `limit`."""
+        return statistics.median(self._open_s) if self._open_s else 0.0
 
     def _forget(self, caller: str | None) -> None:
         if caller is not None:
