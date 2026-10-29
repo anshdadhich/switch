@@ -271,6 +271,11 @@
       "flags": []
     },
     {
+      "route": "DELETE /gateway/users/{user_id}",
+      "auth": "session",
+      "flags": []
+    },
+    {
       "route": "GET /gateway/agent-sessions/approvals",
       "auth": "session",
       "flags": []
