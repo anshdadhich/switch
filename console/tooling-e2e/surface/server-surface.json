@@ -1095,6 +1095,11 @@
       "flags": []
     },
     {
+      "route": "POST /gateway/ownership/transfer",
+      "auth": "session",
+      "flags": []
+    },
+    {
       "route": "POST /gateway/packages",
       "auth": "session",
       "flags": []
